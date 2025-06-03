@@ -29,7 +29,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/vedadiyan/sqlparser/pkg/sqlparser"
+	"github.com/vedadiyan/sqlparser/v2"
 )
 
 func TestNew(t *testing.T) {
@@ -187,7 +187,9 @@ func TestExecSelect(t *testing.T) {
 			name: "Select All Fields",
 			query: &Query{
 				selectDefinition: sqlparser.SelectExprs{
-					&sqlparser.StarExpr{},
+					Exprs: []sqlparser.SelectExpr{
+						&sqlparser.StarExpr{},
+					},
 				},
 			},
 			input: []any{
@@ -202,8 +204,10 @@ func TestExecSelect(t *testing.T) {
 			name: "Select Specific Fields",
 			query: &Query{
 				selectDefinition: sqlparser.SelectExprs{
-					&sqlparser.AliasedExpr{
-						Expr: &sqlparser.ColName{Name: sqlparser.NewIdentifierCI("id")},
+					Exprs: []sqlparser.SelectExpr{
+						&sqlparser.AliasedExpr{
+							Expr: &sqlparser.ColName{Name: sqlparser.NewIdentifierCI("id")},
+						},
 					},
 				},
 			},

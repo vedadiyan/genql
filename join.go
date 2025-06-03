@@ -7,7 +7,7 @@ import (
 
 	"maps"
 
-	"github.com/vedadiyan/sqlparser/pkg/sqlparser"
+	"github.com/vedadiyan/sqlparser/v2"
 )
 
 type (

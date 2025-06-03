@@ -24,7 +24,7 @@ import (
 	"sync"
 
 	"github.com/vedadiyan/genql/compare"
-	"github.com/vedadiyan/sqlparser/pkg/sqlparser"
+	"github.com/vedadiyan/sqlparser/v2"
 )
 
 type (
@@ -232,7 +232,7 @@ func BuildSelect(query *Query, slct *sqlparser.Select) error {
 	if err != nil {
 		return err
 	}
-	err = BuildGroup(query, &slct.GroupBy)
+	err = BuildGroup(query, slct.GroupBy)
 	if err != nil {
 		return err
 	}
@@ -241,7 +241,7 @@ func BuildSelect(query *Query, slct *sqlparser.Select) error {
 		return err
 	}
 	query.havingDefinition = slct.Having
-	query.selectDefinition = slct.SelectExprs
+	query.selectDefinition = *slct.SelectExprs
 	query.whereDefinition = slct.Where
 	query.distinct = slct.Distinct
 	return nil
@@ -281,9 +281,8 @@ func BuildUnion(query *Query, expr *sqlparser.Union) error {
 	slice = append(slice, leftDataArray...)
 	slice = append(slice, rightDataArray...)
 	query.from = slice
-	query.selectDefinition = sqlparser.SelectExprs{
-		&sqlparser.StarExpr{},
-	}
+	query.selectDefinition = sqlparser.SelectExprs{}
+	query.selectDefinition.Exprs = make([]sqlparser.SelectExpr, 0)
 	err = BuildLimit(query, expr.Limit)
 	if err != nil {
 		return err
@@ -295,10 +294,10 @@ func BuildCte(query *Query, expr *sqlparser.With) error {
 	if expr == nil {
 		return nil
 	}
-	for _, cte := range expr.Ctes {
+	for _, cte := range expr.CTEs {
 		copy := *cte
 		query.data[copy.ID.String()] = CteEvaluation(func() (any, error) {
-			query, err := Prepare(query.data, copy.Subquery.Select, query.options)
+			query, err := Prepare(query.data, copy.Subquery, query.options)
 			if err != nil {
 				return nil, err
 			}
@@ -344,7 +343,7 @@ func BuildGroup(query *Query, group *sqlparser.GroupBy) error {
 	if group == nil {
 		return nil
 	}
-	for _, i := range *group {
+	for _, i := range group.Exprs {
 		qualifier, name, err := BuildColumnName(i)
 		if err != nil {
 			return nil
@@ -1215,7 +1214,7 @@ func ValueTupleExpr(query *Query, current Map, expr *sqlparser.ValTuple) ([]any,
 
 func SelectExpr(query *Query, current Map, expr *sqlparser.SelectExprs) (Map, error) {
 	data := make(Map)
-	for _, expr := range *expr {
+	for _, expr := range expr.Exprs {
 		switch expr := expr.(type) {
 		case *sqlparser.StarExpr:
 			{
@@ -1473,15 +1472,15 @@ func FunExpr(query *Query, current Map, expr *sqlparser.FuncExpr) (any, error) {
 			name := fmt.Sprintf("%s.%s", strings.ToLower(expr.Qualifier.String()), expr.Name.Lowered())
 			rs, ok := query.singletonExecutions[name]
 			if !ok {
-				exprs := make(sqlparser.Exprs, 0)
+				exprs := make([]sqlparser.Expr, 0)
 				for _, expr := range expr.Exprs {
-					aliasedExpr, ok := expr.(*sqlparser.AliasedExpr)
+					aliasedExpr, ok := expr.(*sqlparser.Subquery)
 					if !ok {
 						return nil, EXPECTATION_FAILED.Extend(fmt.Sprintf("failed to build global `FUNCTION`. expected aliased expression but found %T", expr))
 					}
-					exprs = append(exprs, aliasedExpr.Expr)
+					exprs = append(exprs, aliasedExpr)
 				}
-				slice, err := AggrFuncArgReader(query, current, exprs)
+				slice, err := AggrFuncArgReader(query, current, sqlparser.Exprs{Exprs: exprs})
 				if err != nil {
 					return nil, err
 				}
@@ -1519,7 +1518,7 @@ func AggrFunExpr(query *Query, current Map, expr sqlparser.AggrFunc) (any, error
 		return nil, INVALID_FUNCTION.Extend(fmt.Sprintf("function %s cannot be found", expr.AggrName()))
 	}
 	if len(query.groupDefinition) != 0 {
-		slice, err := AggrFuncArgReader(query, current, expr.GetArgs())
+		slice, err := AggrFuncArgReader(query, current, sqlparser.Exprs{Exprs: expr.GetArgs()})
 		if err != nil {
 			return nil, err
 		}
@@ -1531,7 +1530,7 @@ func AggrFunExpr(query *Query, current Map, expr sqlparser.AggrFunc) (any, error
 	}
 	rs, ok := query.singletonExecutions[name]
 	if !ok {
-		slice, err := AggrFuncArgReader(query, map[string]any{"*": query.from}, expr.GetArgs())
+		slice, err := AggrFuncArgReader(query, map[string]any{"*": query.from}, sqlparser.Exprs{Exprs: expr.GetArgs()})
 		if err != nil {
 			return nil, err
 		}
@@ -1545,14 +1544,14 @@ func AggrFunExpr(query *Query, current Map, expr sqlparser.AggrFunc) (any, error
 	return rs, nil
 }
 
-func FuncArgReader(query *Query, current Map, selectExprs sqlparser.SelectExprs) ([]any, error) {
-	exprs := make(sqlparser.Exprs, 0)
+func FuncArgReader(query *Query, current Map, selectExprs []sqlparser.Expr) ([]any, error) {
+	exprs := make([]sqlparser.Expr, 0)
 	for _, expr := range selectExprs {
-		aliasedExpr, ok := expr.(*sqlparser.AliasedExpr)
+		aliasedExpr, ok := expr.(*sqlparser.Subquery)
 		if !ok {
 			return nil, EXPECTATION_FAILED.Extend(fmt.Sprintf("failed to build `FUNCTION ARGUMENT`. expected aliased expression but found %T", expr))
 		}
-		exprs = append(exprs, aliasedExpr.Expr)
+		exprs = append(exprs, aliasedExpr)
 	}
 	slice := make([]any, 0)
 	for _, expr := range exprs {
@@ -1571,7 +1570,7 @@ func FuncArgReader(query *Query, current Map, selectExprs sqlparser.SelectExprs)
 
 func AggrFuncArgReader(query *Query, current Map, exprs sqlparser.Exprs) ([]any, error) {
 	slice := make([]any, 0)
-	for _, expr := range exprs {
+	for _, expr := range exprs.Exprs {
 		rs, err := Expr(query, current, expr, nil)
 		if err != nil {
 			return nil, err
@@ -1686,7 +1685,7 @@ func ExecHaving(query *Query, current Map) (bool, error) {
 }
 
 func IsSelectAllAggregate(query *Query) bool {
-	for _, slct := range query.selectDefinition {
+	for _, slct := range query.selectDefinition.Exprs {
 		expr, ok := slct.(*sqlparser.AliasedExpr)
 		if !ok {
 			return false
