@@ -11,22 +11,33 @@ import (
 )
 
 type (
-	Join struct {
-		all   []any
-		left  Partition
-		right Partition
-		mut   sync.Mutex
-		query *Query
-		expr  sqlparser.Expr
+	options struct {
+		parallel bool
+	}
+	StraightJoin struct {
+		all     []any
+		left    Partition
+		right   Partition
+		mut     sync.Mutex
+		query   *Query
+		expr    sqlparser.Expr
+		options options
 	}
 	Locator struct {
 		Map  *Map
 		Rows []int
 	}
-	Partition map[string]Locator
+	Partition   map[string]Locator
+	JoinOptions func(*options)
 )
 
-func (j *Join) match(l Locator, fn func(l Locator, r Locator)) error {
+func ParallelOpt(b bool) JoinOptions {
+	return func(o *options) {
+		o.parallel = b
+	}
+}
+
+func (j *StraightJoin) match(l Locator, fn func(l Locator, r Locator)) error {
 	current := make(Map)
 	j.mut.Lock()
 	maps.Copy(current, *l.Map)
@@ -48,7 +59,7 @@ func (j *Join) match(l Locator, fn func(l Locator, r Locator)) error {
 	return nil
 }
 
-func (j *Join) join(l Locator, r Locator) []any {
+func (j *StraightJoin) join(l Locator, r Locator) []any {
 	out := make([]any, 0)
 	for _, li := range l.Rows {
 		for _, ri := range r.Rows {
@@ -61,7 +72,7 @@ func (j *Join) join(l Locator, r Locator) []any {
 	return out
 }
 
-func NewJoin(query *Query, left, right []any, expr sqlparser.Expr) (*Join, error) {
+func NewStraightJoin(query *Query, left, right []any, expr sqlparser.Expr, opts ...JoinOptions) (*StraightJoin, error) {
 	kl, kr := Key(expr)
 	all := make([]any, 0, len(left)+len(right))
 	all = append(all, left...)
@@ -75,17 +86,34 @@ func NewJoin(query *Query, left, right []any, expr sqlparser.Expr) (*Join, error
 		return nil, err
 	}
 
-	join := new(Join)
+	join := new(StraightJoin)
 	join.all = all
 	join.left = leftPartition
 	join.right = rightPartition
 	join.query = query
 	join.expr = expr
 
+	for _, opt := range opts {
+		opt(&join.options)
+	}
+
 	return join, nil
 }
 
-func (j *Join) Run() ([]any, error) {
+func (j *StraightJoin) RunAuto() ([]any, error) {
+	switch j.options.parallel {
+	case true:
+		{
+			return j.RunParallel()
+		}
+	default:
+		{
+			return j.Run()
+		}
+	}
+}
+
+func (j *StraightJoin) Run() ([]any, error) {
 	out := make([]any, 0)
 	for _, l := range j.left {
 		err := j.match(l, func(l, r Locator) {
@@ -98,7 +126,7 @@ func (j *Join) Run() ([]any, error) {
 	return out, nil
 }
 
-func (j *Join) RunParallel() ([]any, error) {
+func (j *StraightJoin) RunParallel() ([]any, error) {
 	out := make([]any, 0)
 	var wg sync.WaitGroup
 	var mut sync.Mutex
