@@ -318,3 +318,65 @@ func Key(expr sqlparser.Expr) ([]string, []string) {
 	}
 	return left, right
 }
+
+func NewHashJoin(query *Query, left, right []any, expr sqlparser.Expr, opts ...JoinOptions) {
+	kl, kr := Key(expr)
+	l, err := NewHashMap(left, right, kl)
+	if err != nil {
+		panic(err)
+	}
+	r, err := NewHashMap(left, right, kr)
+	if err != nil {
+		panic(err)
+	}
+	_ = l
+	_ = r
+}
+
+type (
+	MappedLocator map[string][]*any
+)
+
+func NewHashMap(left, right []any, keys []string) ([]MappedLocator, error) {
+	segments := make([][]string, len(keys))
+
+	for i := 0; i < len(keys); i++ {
+		segments[i] = SplitKey(keys[i])
+	}
+
+	cp := append(left, right...)
+	hashMap := make([]MappedLocator, 0, len(segments))
+	for _, segment := range segments {
+		mapper := make(map[string][]*any)
+		for j := 0; j < len(cp); j++ {
+			r := cp[j]
+			v, err := ExtractKeys(r.(Map), segment...)
+			if err != nil {
+				if err.Error() == "key not found" {
+					continue
+				}
+				return nil, err
+			}
+			cp = Delete(cp, j)
+			j--
+			key := fmt.Sprintf("%v", v)
+			if _, ok := mapper[key]; !ok {
+				mapper[key] = make([]*any, 0)
+			}
+			mapper[key] = append(mapper[key], &r)
+		}
+		if len(mapper) == 0 {
+			continue
+		}
+		hashMap = append(hashMap, mapper)
+	}
+	return hashMap, nil
+}
+
+func Delete[T any](slice []T, index int) []T {
+	out := slice[:index]
+	if index != len(slice)-1 {
+		out = append(out, slice[index+1:]...)
+	}
+	return out
+}

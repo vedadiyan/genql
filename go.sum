@@ -6,8 +6,8 @@ github.com/planetscale/vtprotobuf v0.6.0 h1:nBeETjudeJ5ZgBHUz1fVHvbqUKnYOXNhsIEa
 github.com/planetscale/vtprotobuf v0.6.0/go.mod h1:t/avpk3KcrXxUnYOhZhMXJlSEyie6gQbtLq5NM3loB8=
 github.com/spf13/pflag v1.0.5 h1:iy+VFUOCP1a+8yFto/drg2CJ5u0yRoB7fZw3DKv/JXA=
 github.com/spf13/pflag v1.0.5/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
-github.com/vedadiyan/sqlparser/v2 v2.0.1 h1:vHvykX70/iEC/NmlFqaXjDe7bXxWceCO549YFXHUtyk=
-github.com/vedadiyan/sqlparser/v2 v2.0.1/go.mod h1:wK3FtP6JoDI7+jXXMhuO5UP8CiPSuvXlWydXzlxSupM=
+github.com/vedadiyan/sqlparser/v2 v2.0.2 h1:c7gcE9wlkYwmuxvNDQVB1jNYPOVVBx2ulW7rUMGJYZo=
+github.com/vedadiyan/sqlparser/v2 v2.0.2/go.mod h1:wK3FtP6JoDI7+jXXMhuO5UP8CiPSuvXlWydXzlxSupM=
 golang.org/x/sys v0.33.0 h1:q3i8TbbEz+JRD9ywIRlyRAQbM0qF7hu24q3teo2hbuw=
 golang.org/x/sys v0.33.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
 google.golang.org/protobuf v1.33.0 h1:uNO2rsAINq/JlFpSdYEKIZ0uKD/R9cpdv0T+yoGwGmI=

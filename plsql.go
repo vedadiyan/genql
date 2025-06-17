@@ -431,6 +431,7 @@ func ExecJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, jo
 	switch t := joinType; {
 	case t.IsHashJoin():
 		{
+			NewHashJoin(query, left, right, joinExpr)
 			panic("not implemented")
 		}
 	default:
