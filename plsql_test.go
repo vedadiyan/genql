@@ -598,7 +598,7 @@ func TestBuildJoin(t *testing.T) {
 			name: "Inner Join",
 			query: `SELECT u.*, o.amount 
 					FROM users u 
-					JOIN orders o ON u.id = o.user_id`,
+					JOIN orders o ON o.user_id != u.id AND o.user_id != u.id`,
 			data: Map{
 				"users": []Map{
 					{"id": 1, "name": "user1"},

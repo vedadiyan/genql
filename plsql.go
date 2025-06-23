@@ -425,52 +425,7 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 }
 
 func ExecJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
-	if joinType == sqlparser.RightJoinType {
-		left, right = right, left
-	}
-	slice := make([]any, 0)
-	for _, left := range left {
-		left, ok := left.(Map)
-		if !ok {
-			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", left))
-		}
-		joined := false
-		for _, right := range right {
-			current := make(Map)
-			for key, value := range left {
-				current[key] = value
-			}
-			right, ok := right.(Map)
-			if !ok {
-				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", left))
-			}
-			for key, value := range right {
-				current[key] = value
-			}
-			rs, err := Expr(query, current, joinExpr, nil)
-			if err != nil {
-				return nil, err
-			}
-			rsValue, ok := rs.(bool)
-			if !ok {
-				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected boolean but found %T", left))
-			}
-			if rsValue {
-				slice = append(slice, current)
-				joined = true
-			}
-		}
-		if !joined {
-			current := make(Map)
-			for key, value := range left {
-				current[key] = value
-			}
-			if joinType != sqlparser.NormalJoinType {
-				slice = append(slice, current)
-			}
-		}
-	}
-	return slice, nil
+	return ExecJoin2(query, left, right, joinExpr, joinType)
 }
 
 func BuildLiteral(expr sqlparser.Expr) (sqlparser.ValType, string, error) {
