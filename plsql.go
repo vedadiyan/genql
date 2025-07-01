@@ -425,7 +425,7 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 }
 
 func ExecJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
-	return ExecJoin2(query, left, right, joinExpr, joinType)
+	return ExecJoin3(query, left, right, joinExpr, joinType)
 }
 
 func BuildLiteral(expr sqlparser.Expr) (sqlparser.ValType, string, error) {

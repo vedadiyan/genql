@@ -1,9 +1,14 @@
 package genql
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/vedadiyan/sqlparser/pkg/sqlparser"
 )
@@ -58,6 +63,101 @@ func ExecJoin2(query *Query, left []any, right []any, joinExpr sqlparser.Expr, j
 	return slice, nil
 }
 
+func ToHash(mapper [][]byte) (string, error) {
+	var buffer bytes.Buffer
+	for _, value := range mapper {
+		// binary.Write(&buffer, binary.LittleEndian, value)
+		// buffer.WriteString("-")
+		buffer.Write(value)
+		buffer.WriteString("-")
+	}
+	sha256 := sha256.New()
+	_, err := sha256.Write(buffer.Bytes())
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(sha256.Sum(nil)), nil
+}
+
+type (
+	HashedTable struct {
+		Rows map[string][]*any
+		Keys map[string]*Map
+	}
+)
+
+func NewHashedTable() *HashedTable {
+	out := new(HashedTable)
+	out.Rows = make(map[string][]*any)
+	out.Keys = make(map[string]*map[string]any)
+
+	return out
+}
+
+func ToCatalog(rows []any, joinExpr sqlparser.Expr) (*HashedTable, error) {
+	hashedTable := NewHashedTable()
+	var buffer bytes.Buffer
+	for _, row := range rows {
+		hashMap := make([][]byte, 0)
+		mapper := make(Map)
+		columns := extractJoinColumns(row.(Map), joinExpr)
+		sort.Slice(columns, func(i, j int) bool {
+			return columns[i] > columns[j]
+		})
+		for _, column := range columns {
+			reader, err := ExecReader(row, column)
+			if err != nil {
+				return nil, err
+			}
+			binary.Write(&buffer, binary.LittleEndian, reader)
+			hashMap = append(hashMap, buffer.Bytes())
+			buffer.Reset()
+			mapper[column] = reader
+		}
+		hash, err := ToHash(hashMap)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := hashedTable.Keys[hash]; !ok {
+			hashedTable.Rows[hash] = make([]*any, 0)
+			hashedTable.Keys[hash] = &mapper
+		}
+		hashedTable.Rows[hash] = append(hashedTable.Rows[hash], &row)
+	}
+	return hashedTable, nil
+}
+
+// Original nested loop join (for reference)
+func ExecJoin3(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
+	if joinType == sqlparser.RightJoinType {
+		left, right = right, left
+	}
+
+	l, err := ToCatalog(left, joinExpr)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(len(l.Rows), "vs", len(left))
+	then := time.Now()
+	r, err := ToCatalog(right, joinExpr)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	fmt.Println(len(r.Rows), "vs", len(right))
+	fmt.Println(now.Sub(then).Milliseconds())
+	return nil, nil
+	slice := make([]any, 0)
+	for lk, lv := range l.Rows {
+		rv, exist := r.Rows[lk]
+		if exist {
+			_ = lv
+			_ = rv
+		}
+	}
+	return slice, nil
+}
+
 // HashJoin - Build hash table on smaller relation, probe with larger
 func ExecHashJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
 	if joinType == sqlparser.RightJoinType {
@@ -94,7 +194,6 @@ func ExecHashJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr
 		rightJoinKey := extractJoinKey(probeRow, joinExpr)
 		matchingRows, exists := hashTable[rightJoinKey]
 
-		joined := false
 		if exists {
 			for _, matchingRow := range matchingRows {
 				// Create joined row
@@ -105,30 +204,8 @@ func ExecHashJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr
 				for key, value := range matchingRow {
 					current[key] = value
 				}
-
-				// Evaluate full join condition
-				rs, err := Expr(query, current, joinExpr, nil)
-				if err != nil {
-					return nil, err
-				}
-				rsValue, ok := rs.(bool)
-				if !ok {
-					return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected boolean but found %T", rs))
-				}
-				if rsValue {
-					result = append(result, current)
-					joined = true
-				}
+				result = append(result, current)
 			}
-		}
-
-		// Handle left join case
-		if !joined && joinType != sqlparser.NormalJoinType {
-			current := make(Map)
-			for key, value := range probeRow {
-				current[key] = value
-			}
-			result = append(result, current)
 		}
 	}
 
