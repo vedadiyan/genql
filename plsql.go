@@ -79,6 +79,8 @@ type (
 		postProcessors      []func() error
 		dual                bool
 		options             *Options
+
+		ident string
 	}
 )
 
@@ -391,7 +393,7 @@ func BuildFrom(query *Query, tableExpr *sqlparser.TableExpr) error {
 	switch tableExpr := (*tableExpr).(type) {
 	case *sqlparser.AliasedTableExpr:
 		{
-			return BuilFromAliasedTable(query, tableExpr.As.String(), tableExpr.Expr)
+			return BuildFromAliasedTable(query, tableExpr.As.String(), tableExpr.Expr)
 		}
 	case *sqlparser.JoinTableExpr:
 		{
@@ -415,7 +417,7 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 	if err != nil {
 		return err
 	}
-	rs, err := ExecJoin(query, left.from, right.from, joinExpr.Condition.On, joinExpr.Join)
+	rs, err := ExecJoin(query, left.from, right.from, left.ident, right.ident, joinExpr.Into, joinExpr.Condition.On, joinExpr.Join)
 	if err != nil {
 		return nil
 	}
@@ -423,26 +425,8 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 	return nil
 }
 
-func ExecJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
-	if !joinType.IsLeftJoin() {
-		left, right = right, left
-	}
-
-	switch t := joinType; {
-	case t.IsHashJoin():
-		{
-			NewHashJoin(query, left, right, joinExpr)
-			panic("not implemented")
-		}
-	default:
-		{
-			join, err := NewStraightJoin(query, left, right, joinExpr, ParallelOpt(t.IsParallel()))
-			if err != nil {
-				return nil, err
-			}
-			return join.RunAuto()
-		}
-	}
+func ExecJoin(query *Query, left []any, right []any, leftIdent string, rightIdent string, into string, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
+	return ExecJoin3(query, left, right, leftIdent, rightIdent, into, joinExpr, joinType)
 }
 
 func BuildLiteral(expr sqlparser.Expr) (sqlparser.ValType, string, error) {
@@ -461,7 +445,7 @@ func BuildColumnName(expr sqlparser.Expr) (string, string, error) {
 	return columnName.Qualifier.Name.String(), columnName.Name.String(), nil
 }
 
-func BuilFromAliasedTable(query *Query, as string, expr sqlparser.SimpleTableExpr) error {
+func BuildFromAliasedTable(query *Query, as string, expr sqlparser.SimpleTableExpr) error {
 	switch expr := expr.(type) {
 	case sqlparser.TableName:
 		{
@@ -472,6 +456,11 @@ func BuilFromAliasedTable(query *Query, as string, expr sqlparser.SimpleTableExp
 				tableName = name
 			} else {
 				tableName = fmt.Sprintf("%s.%s", qualifier, name)
+			}
+			if len(as) == 0 {
+				query.ident = strings.SplitN(tableName, ".", 2)[0]
+			} else {
+				query.ident = as
 			}
 			data, err := ExecReader(query.data, tableName)
 			if err != nil {

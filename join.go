@@ -2,381 +2,533 @@ package genql
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
-	"sync"
-
 	"maps"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/vedadiyan/sqlparser/v2"
 )
 
-type (
-	options struct {
-		parallel bool
+// Original nested loop join (for reference)
+func ExecJoin2(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
+	if joinType == sqlparser.RightJoinType {
+		left, right = right, left
 	}
-	StraightJoin struct {
-		all     []any
-		left    Partition
-		right   Partition
-		mut     sync.Mutex
-		query   *Query
-		expr    sqlparser.Expr
-		options options
-	}
-	Locator struct {
-		Map  *Map
-		Rows []int
-	}
-	Partition   map[string]Locator
-	JoinOptions func(*options)
-)
-
-func ParallelOpt(b bool) JoinOptions {
-	return func(o *options) {
-		o.parallel = b
-	}
-}
-
-func (j *StraightJoin) match(l Locator, fn func(l Locator, r Locator)) error {
-	current := make(Map)
-	j.mut.Lock()
-	maps.Copy(current, *l.Map)
-	j.mut.Unlock()
-	for _, r := range j.right {
-		maps.Copy(current, *r.Map)
-		rs, err := Expr(j.query, current, j.expr, nil)
-		if err != nil {
-			return err
-		}
-		rsValue, ok := rs.(bool)
+	slice := make([]any, 0)
+	for _, left := range left {
+		left, ok := left.(Map)
 		if !ok {
-			return INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected boolean but found %T", rs))
+			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", left))
 		}
-		if rsValue {
-			fn(l, r)
-		}
-	}
-	return nil
-}
-
-func (j *StraightJoin) join(l Locator, r Locator) []any {
-	out := make([]any, 0)
-	for _, li := range l.Rows {
-		for _, ri := range r.Rows {
+		joined := false
+		for _, right := range right {
 			current := make(Map)
-			maps.Copy(current, j.all[li].(Map))
-			maps.Copy(current, j.all[ri].(Map))
-			out = append(out, current)
-		}
-	}
-	return out
-}
-
-func NewStraightJoin(query *Query, left, right []any, expr sqlparser.Expr, opts ...JoinOptions) (*StraightJoin, error) {
-	kl, kr := Key(expr)
-	all := make([]any, 0, len(left)+len(right))
-	all = append(all, left...)
-	all = append(all, right...)
-	leftPartition, err := Partitionize(all, kl)
-	if err != nil {
-		return nil, err
-	}
-	rightPartition, err := Partitionize(all, kr)
-	if err != nil {
-		return nil, err
-	}
-
-	join := new(StraightJoin)
-	join.all = all
-	join.left = leftPartition
-	join.right = rightPartition
-	join.query = query
-	join.expr = expr
-
-	for _, opt := range opts {
-		opt(&join.options)
-	}
-
-	return join, nil
-}
-
-func (j *StraightJoin) RunAuto() ([]any, error) {
-	switch j.options.parallel {
-	case true:
-		{
-			return j.RunParallel()
-		}
-	default:
-		{
-			return j.Run()
-		}
-	}
-}
-
-func (j *StraightJoin) Run() ([]any, error) {
-	out := make([]any, 0)
-	for _, l := range j.left {
-		err := j.match(l, func(l, r Locator) {
-			data := j.join(l, r)
-			out = append(out, data...)
-		})
-		if err != nil {
-		}
-	}
-	return out, nil
-}
-
-func (j *StraightJoin) RunParallel() ([]any, error) {
-	out := make([]any, 0)
-	var wg sync.WaitGroup
-	var mut sync.Mutex
-	for _, l := range j.left {
-		wg.Add(1)
-		go func(l Locator) {
-			defer wg.Done()
-			err := j.match(l, func(l, r Locator) {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					data := j.join(l, r)
-					mut.Lock()
-					out = append(out, data...)
-					mut.Unlock()
-				}()
-			})
-			if err != nil {
+			for key, value := range left {
+				current[key] = value
 			}
-		}(l)
-	}
-	wg.Wait()
-	return out, nil
-}
-
-func Partitionize(rows []any, keys []string) (Partition, error) {
-	partition := make(Partition)
-
-	segments := make([][]string, len(keys))
-
-	for i := 0; i < len(keys); i++ {
-		segments[i] = SplitKey(keys[i])
-	}
-
-	var buffer bytes.Buffer
-
-LOOP:
-	for i, r := range rows {
-		mapper := make(Map)
-		buffer.Reset()
-		for i, segment := range segments {
-			v, err := ExtractKeys(r.(Map), segment...)
+			right, ok := right.(Map)
+			if !ok {
+				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", left))
+			}
+			for key, value := range right {
+				current[key] = value
+			}
+			rs, err := Expr(query, current, joinExpr, nil)
 			if err != nil {
-				if err.Error() == "key not found" {
-					continue LOOP
-				}
 				return nil, err
 			}
-			ref := mapper
-			for i := 0; i < len(segment)-1; i++ {
-				k := segment[i]
-				v, ok := ref[k]
-				if !ok {
-					ref[k] = make(Map)
-					v = ref[k]
-				}
-				ref = v.(Map)
+			rsValue, ok := rs.(bool)
+			if !ok {
+				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected boolean but found %T", left))
 			}
-			ref[segment[len(segment)-1]] = v
-			buffer.WriteString(fmt.Sprintf(`"%s":"%v",`, keys[i], v))
+			if rsValue {
+				slice = append(slice, current)
+				joined = true
+			}
 		}
-		key := buffer.String()
-		v, ok := partition[key]
-		if !ok {
-			locator := new(Locator)
-			locator.Map = &mapper
-			locator.Rows = make([]int, 0)
-			partition[key] = *locator
-			v = partition[key]
+		if !joined {
+			current := make(Map)
+			for key, value := range left {
+				current[key] = value
+			}
+			if joinType != sqlparser.NormalJoinType {
+				slice = append(slice, current)
+			}
 		}
-		v.Rows = append(partition[key].Rows, i)
-		partition[key] = v
 	}
-
-	return partition, nil
+	return slice, nil
 }
 
-func ExtractKeys(row Map, segments ...string) (any, error) {
-	v, ok := row[segments[0]]
-	if !ok {
-		return nil, fmt.Errorf("key not found")
-	}
-	if v, ok := v.(Map); ok {
-		return ExtractKeys(v, segments[1:]...)
-	}
-	if len(segments) > 1 {
-		return nil, fmt.Errorf("cannot propegate further")
-	}
-	return v, nil
-}
-
-func SplitKey(key string) []string {
+func ToHash(mapper [][]byte) (string, error) {
 	var buffer bytes.Buffer
-	out := make([]string, 0)
-
-	jump := false
-
-	for _, r := range key {
-		if r == '\\' {
-			buffer.WriteRune(r)
-			jump = true
-			continue
-		}
-		if r != '.' || jump {
-			jump = false
-			buffer.WriteRune(r)
-			continue
-		}
-		out = append(out, buffer.String())
-		buffer.Reset()
+	for _, value := range mapper {
+		// binary.Write(&buffer, binary.LittleEndian, value)
+		// buffer.WriteString("-")
+		buffer.Write(value)
+		buffer.WriteString("-")
 	}
-
-	if buffer.Len() != 0 {
-		out = append(out, buffer.String())
-		buffer.Reset()
-	}
-
-	return out
-}
-
-func Key(expr sqlparser.Expr) ([]string, []string) {
-	left := make([]string, 0)
-	right := make([]string, 0)
-	switch expr := expr.(type) {
-	case *sqlparser.AndExpr:
-		{
-			ll, lr := Key(expr.Left)
-			rl, rr := Key(expr.Right)
-
-			left = append(left, ll...)
-			left = append(left, lr...)
-			right = append(right, rl...)
-			right = append(right, rr...)
-		}
-	case *sqlparser.OrExpr:
-		{
-			ll, lr := Key(expr.Left)
-			rl, rr := Key(expr.Right)
-
-			left = append(left, ll...)
-			left = append(left, lr...)
-			right = append(right, rl...)
-			right = append(right, rr...)
-		}
-	case *sqlparser.ComparisonExpr:
-		{
-			ll, lr := Key(expr.Left)
-			rl, rr := Key(expr.Right)
-
-			left = append(left, ll...)
-			left = append(left, lr...)
-			right = append(right, rl...)
-			right = append(right, rr...)
-		}
-	case *sqlparser.BetweenExpr:
-		{
-			ll, lr := Key(expr.Left)
-
-			left = append(left, ll...)
-			left = append(left, lr...)
-		}
-	case *sqlparser.BinaryExpr:
-		{
-			ll, lr := Key(expr.Left)
-			rl, rr := Key(expr.Right)
-
-			left = append(left, ll...)
-			left = append(left, lr...)
-			right = append(right, rl...)
-			right = append(right, rr...)
-		}
-	case *sqlparser.NullVal:
-		{
-			return nil, nil
-		}
-
-	case *sqlparser.ColName:
-		{
-			qualifier, name, err := BuildColumnName(expr)
-			if err != nil {
-				return nil, nil
-			}
-			columnName := name
-			if len(qualifier) > 0 {
-				columnName = fmt.Sprintf("%s.%s", qualifier, name)
-			}
-			return []string{columnName}, []string{}
-		}
-	}
-	return left, right
-}
-
-func NewHashJoin(query *Query, left, right []any, expr sqlparser.Expr, opts ...JoinOptions) {
-	kl, kr := Key(expr)
-	l, err := NewHashMap(left, right, kl)
+	sha256 := sha256.New()
+	_, err := sha256.Write(buffer.Bytes())
 	if err != nil {
-		panic(err)
+		return "", err
 	}
-	r, err := NewHashMap(left, right, kr)
-	if err != nil {
-		panic(err)
-	}
-	_ = l
-	_ = r
+	return base64.StdEncoding.EncodeToString(sha256.Sum(nil)), nil
 }
 
 type (
-	MappedLocator map[string][]*any
+	HashedTable struct {
+		Rows map[string][]*any
+		Keys map[string]*Map
+	}
 )
 
-func NewHashMap(left, right []any, keys []string) ([]MappedLocator, error) {
-	segments := make([][]string, len(keys))
+func NewHashedTable() *HashedTable {
+	out := new(HashedTable)
+	out.Rows = make(map[string][]*any)
+	out.Keys = make(map[string]*map[string]any)
 
-	for i := 0; i < len(keys); i++ {
-		segments[i] = SplitKey(keys[i])
-	}
-
-	cp := append(left, right...)
-	hashMap := make([]MappedLocator, 0, len(segments))
-	for _, segment := range segments {
-		mapper := make(map[string][]*any)
-		for j := 0; j < len(cp); j++ {
-			r := cp[j]
-			v, err := ExtractKeys(r.(Map), segment...)
-			if err != nil {
-				if err.Error() == "key not found" {
-					continue
-				}
-				return nil, err
-			}
-			cp = Delete(cp, j)
-			j--
-			key := fmt.Sprintf("%v", v)
-			if _, ok := mapper[key]; !ok {
-				mapper[key] = make([]*any, 0)
-			}
-			mapper[key] = append(mapper[key], &r)
-		}
-		if len(mapper) == 0 {
-			continue
-		}
-		hashMap = append(hashMap, mapper)
-	}
-	return hashMap, nil
+	return out
 }
 
-func Delete[T any](slice []T, index int) []T {
-	out := slice[:index]
-	if index != len(slice)-1 {
-		out = append(out, slice[index+1:]...)
+func ToCatalog(rows []any, ident string, joinExpr sqlparser.Expr) (*HashedTable, error) {
+	hashedTable := NewHashedTable()
+	var buffer bytes.Buffer
+	columns := extractJoinColumns(ident, joinExpr)
+	sort.Slice(columns, func(i, j int) bool {
+		return columns[i] > columns[j]
+	})
+	for _, row := range rows {
+		r := row
+		hashMap := make([][]byte, 0)
+		mapper := make(Map)
+		for _, column := range columns {
+			reader, err := ExecReader(row, column)
+			if err != nil {
+				return nil, err
+			}
+			binary.Write(&buffer, binary.LittleEndian, reader)
+			hashMap = append(hashMap, buffer.Bytes())
+			buffer.Reset()
+			mapper[strings.ReplaceAll(column, "'", "")] = reader
+		}
+		hash, err := ToHash(hashMap)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := hashedTable.Keys[hash]; !ok {
+			hashedTable.Rows[hash] = make([]*any, 0)
+			hashedTable.Keys[hash] = &mapper
+		}
+		hashedTable.Rows[hash] = append(hashedTable.Rows[hash], &r)
 	}
-	return out
+	return hashedTable, nil
+}
+
+// Original nested loop join (for reference)
+func ExecJoin3(query *Query, left []any, right []any, leftIdent string, rightIdent string, into string, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
+	if joinType == sqlparser.RightJoinType {
+		left, right = right, left
+	}
+
+	l, err := ToCatalog(left, leftIdent, joinExpr)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(len(l.Rows), "vs", len(left))
+	then := time.Now()
+	r, err := ToCatalog(right, rightIdent, joinExpr)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	fmt.Println(len(r.Rows), "vs", len(right))
+	fmt.Println(now.Sub(then).Milliseconds())
+	slice := make([]any, 0)
+	if len(into) != 0 {
+		for lk, lv := range l.Rows {
+			rv, exist := r.Rows[lk]
+			if exist {
+				mapper := make(Map)
+				map2 := make(Map)
+				if len(leftIdent) != 0 {
+					left := make([]any, 0)
+					for _, x := range lv {
+						left = append(left, (*x).(Map)[leftIdent])
+					}
+					map2[leftIdent] = left
+				} else {
+					for i, x := range lv {
+						if i > 0 {
+							panic("")
+						}
+						maps.Copy(map2, (*x).(Map))
+					}
+				}
+				if len(rightIdent) != 0 {
+					right := make([]any, 0)
+					for _, x := range rv {
+						right = append(right, (*x).(Map)[rightIdent])
+					}
+					map2[rightIdent] = right
+				} else {
+					for i, x := range rv {
+						if i > 0 {
+							panic("")
+						}
+						maps.Copy(map2, (*x).(Map))
+					}
+				}
+				maps.Copy(map2, *(l.Keys[lk]))
+				maps.Copy(map2, *(r.Keys[lk]))
+				mapper[into] = map2
+				slice = append(slice, mapper)
+			}
+		}
+	}
+	return slice, nil
+}
+
+// // HashJoin - Build hash table on smaller relation, probe with larger
+// func ExecHashJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
+// 	if joinType == sqlparser.RightJoinType {
+// 		left, right = right, left
+// 	}
+
+// 	// Choose build and probe sides (build on smaller relation)
+// 	buildSide, probeSide := right, left
+// 	if len(left) < len(right) {
+// 		buildSide, probeSide = left, right
+// 	}
+
+// 	// Build phase: create hash table
+// 	hashTable := make(map[string][]Map)
+// 	for _, item := range buildSide {
+// 		buildRow, ok := item.(Map)
+// 		if !ok {
+// 			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", item))
+// 		}
+
+// 		// Extract join key(s) - now using side-specific extraction
+// 		leftJoinKey := extractJoinKey(buildRow, joinExpr)
+// 		hashTable[leftJoinKey] = append(hashTable[leftJoinKey], buildRow)
+// 	}
+
+// 	// Probe phase
+// 	result := make([]any, 0)
+// 	for _, item := range probeSide {
+// 		probeRow, ok := item.(Map)
+// 		if !ok {
+// 			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", item))
+// 		}
+
+// 		rightJoinKey := extractJoinKey(probeRow, joinExpr)
+// 		matchingRows, exists := hashTable[rightJoinKey]
+
+// 		if exists {
+// 			for _, matchingRow := range matchingRows {
+// 				// Create joined row
+// 				current := make(Map)
+// 				for key, value := range probeRow {
+// 					current[key] = value
+// 				}
+// 				for key, value := range matchingRow {
+// 					current[key] = value
+// 				}
+// 				result = append(result, current)
+// 			}
+// 		}
+// 	}
+
+// 	return result, nil
+// }
+
+// SortedJoin - Sort both relations on join key, then merge
+type SortableRow struct {
+	Row     Map
+	JoinKey string
+}
+
+// func ExecSortedJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
+// 	if joinType == sqlparser.RightJoinType {
+// 		left, right = right, left
+// 	}
+
+// 	// Convert and sort left relation
+// 	leftSorted := make([]SortableRow, 0, len(left))
+// 	for _, item := range left {
+// 		row, ok := item.(Map)
+// 		if !ok {
+// 			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", item))
+// 		}
+// 		leftJoinKey := extractJoinKey(row, joinExpr)
+// 		leftSorted = append(leftSorted, SortableRow{Row: row, JoinKey: leftJoinKey})
+// 	}
+// 	sort.Slice(leftSorted, func(i, j int) bool {
+// 		return leftSorted[i].JoinKey < leftSorted[j].JoinKey
+// 	})
+
+// 	// Convert and sort right relation
+// 	rightSorted := make([]SortableRow, 0, len(right))
+// 	for _, item := range right {
+// 		row, ok := item.(Map)
+// 		if !ok {
+// 			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", item))
+// 		}
+// 		rightJoinKey := extractJoinKey(row, joinExpr)
+// 		rightSorted = append(rightSorted, SortableRow{Row: row, JoinKey: rightJoinKey})
+// 	}
+// 	sort.Slice(rightSorted, func(i, j int) bool {
+// 		return rightSorted[i].JoinKey < rightSorted[j].JoinKey
+// 	})
+
+// 	// Merge join
+// 	result := make([]any, 0)
+// 	i, j := 0, 0
+
+// 	for i < len(leftSorted) {
+// 		leftRow := leftSorted[i]
+// 		joined := false
+
+// 		// Find all matching rows in right relation
+// 		for j < len(rightSorted) && rightSorted[j].JoinKey < leftRow.JoinKey {
+// 			j++
+// 		}
+
+// 		startJ := j
+// 		for j < len(rightSorted) && rightSorted[j].JoinKey == leftRow.JoinKey {
+// 			rightRow := rightSorted[j]
+
+// 			// Create joined row
+// 			current := make(Map)
+// 			for key, value := range leftRow.Row {
+// 				current[key] = value
+// 			}
+// 			for key, value := range rightRow.Row {
+// 				current[key] = value
+// 			}
+
+// 			// Evaluate full join condition
+// 			rs, err := Expr(query, current, joinExpr, nil)
+// 			if err != nil {
+// 				return nil, err
+// 			}
+// 			rsValue, ok := rs.(bool)
+// 			if !ok {
+// 				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected boolean but found %T", rs))
+// 			}
+// 			if rsValue {
+// 				result = append(result, current)
+// 				joined = true
+// 			}
+// 			j++
+// 		}
+
+// 		// Reset j for next left row with same key
+// 		j = startJ
+
+// 		// Handle left join case
+// 		if !joined && joinType != sqlparser.NormalJoinType {
+// 			current := make(Map)
+// 			for key, value := range leftRow.Row {
+// 				current[key] = value
+// 			}
+// 			result = append(result, current)
+// 		}
+
+// 		i++
+// 	}
+
+// 	return result, nil
+// }
+
+// // MergeJoin - Assumes both relations are already sorted on join key
+// func ExecMergeJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
+// 	if joinType == sqlparser.RightJoinType {
+// 		left, right = right, left
+// 	}
+
+// 	result := make([]any, 0)
+// 	i, j := 0, 0
+
+// 	for i < len(left) {
+// 		leftRow, ok := left[i].(Map)
+// 		if !ok {
+// 			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", left[i]))
+// 		}
+
+// 		leftJoinKey := extractJoinKey(leftRow, joinExpr)
+// 		joined := false
+
+// 		// Skip right rows that are smaller than current left key
+// 		for j < len(right) {
+// 			rightRow, ok := right[j].(Map)
+// 			if !ok {
+// 				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", right[j]))
+// 			}
+// 			rightJoinKey := extractJoinKey(rightRow, joinExpr)
+// 			if rightJoinKey < leftJoinKey {
+// 				j++
+// 			} else {
+// 				break
+// 			}
+// 		}
+
+// 		// Process all matching right rows
+// 		startJ := j
+// 		for j < len(right) {
+// 			rightRow, ok := right[j].(Map)
+// 			if !ok {
+// 				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", right[j]))
+// 			}
+// 			rightJoinKey := extractJoinKey(rightRow, joinExpr)
+
+// 			if rightJoinKey != leftJoinKey {
+// 				break
+// 			}
+
+// 			// Create joined row
+// 			current := make(Map)
+// 			for key, value := range leftRow {
+// 				current[key] = value
+// 			}
+// 			for key, value := range rightRow {
+// 				current[key] = value
+// 			}
+
+// 			// Evaluate full join condition
+// 			rs, err := Expr(query, current, joinExpr, nil)
+// 			if err != nil {
+// 				return nil, err
+// 			}
+// 			rsValue, ok := rs.(bool)
+// 			if !ok {
+// 				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected boolean but found %T", rs))
+// 			}
+// 			if rsValue {
+// 				result = append(result, current)
+// 				joined = true
+// 			}
+// 			j++
+// 		}
+
+// 		// Reset j for potential matches with next left row
+// 		j = startJ
+
+// 		// Handle left join case
+// 		if !joined && joinType != sqlparser.NormalJoinType {
+// 			current := make(Map)
+// 			for key, value := range leftRow {
+// 				current[key] = value
+// 			}
+// 			result = append(result, current)
+// 		}
+
+// 		i++
+// 	}
+
+// 	return result, nil
+// }
+
+// Helper function to extract left-side join key from row
+func extractJoinKey(ident string, joinExpr sqlparser.Expr) string {
+	keys := extractJoinColumns(ident, joinExpr)
+	_ = keys
+	//return buildJoinKey(row, keys)
+	return ""
+}
+
+// Build join key from specified columns
+func buildJoinKey(row Map, keys []string) string {
+	if len(keys) == 0 {
+		// Fallback: if we can't parse the expression, create a composite key
+		key := ""
+		for k, v := range row {
+			key += fmt.Sprintf("%s:%v;", k, v)
+		}
+		return key
+	}
+
+	// Create composite key from the specified columns
+	keyParts := make([]string, 0, len(keys))
+	for _, col := range keys {
+		val, err := ExecReader(row, col)
+		if err != nil {
+			// Column doesn't exist in this row - this shouldn't happen if we parsed correctly
+			keyParts = append(keyParts, "NULL")
+			continue
+		}
+		if val != nil {
+			keyParts = append(keyParts, fmt.Sprintf("%v", val))
+		} else {
+			keyParts = append(keyParts, "NULL")
+		}
+	}
+
+	// Join with a delimiter that won't appear in normal data
+	return fmt.Sprintf("[%s]", strings.Join(keyParts, "§"))
+}
+
+// Extract left-side column names from join expression
+func extractJoinColumns(ident string, expr sqlparser.Expr) []string {
+	var columns []string
+
+	switch e := expr.(type) {
+	case *sqlparser.ComparisonExpr:
+		if b, _, leftCol := extractColumnsFromExpr(ident, e.Left); b || len(ident) == 0 {
+			columns = append(columns, leftCol)
+			break
+		}
+
+		if b, _, rightCol := extractColumnsFromExpr(ident, e.Right); b {
+			columns = append(columns, rightCol)
+			break
+		}
+	case *sqlparser.AndExpr:
+		leftCols := extractJoinColumns(ident, e.Left)
+		rightCols := extractJoinColumns(ident, e.Right)
+		columns = append(columns, leftCols...)
+		columns = append(columns, rightCols...)
+	case *sqlparser.OrExpr:
+		leftCols := extractJoinColumns(ident, e.Left)
+		rightCols := extractJoinColumns(ident, e.Right)
+		columns = append(columns, leftCols...)
+		columns = append(columns, rightCols...)
+	}
+
+	return removeDuplicates(columns)
+}
+
+// Remove duplicate strings from slice
+func removeDuplicates(slice []string) []string {
+	seen := make(map[string]bool)
+	unique := make([]string, 0)
+	for _, item := range slice {
+		if !seen[item] {
+			seen[item] = true
+			unique = append(unique, item)
+		}
+	}
+	return unique
+}
+
+// Extract column names from a single expression
+func extractColumnsFromExpr(ident string, expr sqlparser.Expr) (bool, string, string) {
+
+	switch e := expr.(type) {
+	case *sqlparser.ColName:
+		// Handle column references like "table.column" or just "column"
+		colName := strings.Split(e.Name.String(), ".")
+		if !e.Qualifier.IsEmpty() {
+			colName = append([]string{e.Qualifier.Name.String()}, colName...)
+		}
+
+		return ident == colName[0], colName[0], strings.Join(colName, ".")
+	}
+
+	panic("")
 }
