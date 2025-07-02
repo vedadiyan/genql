@@ -417,6 +417,27 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 	if err != nil {
 		return err
 	}
+	if joinExpr.Condition.On == nil {
+		expr := new(sqlparser.AndExpr)
+		expr.Left = sqlparser.BoolVal(true)
+		expr.Right = sqlparser.BoolVal(true)
+		for i, item := range joinExpr.Condition.Using {
+			equiExpr := new(sqlparser.ComparisonExpr)
+			equiExpr.Left = sqlparser.NewColName(fmt.Sprintf("%s.%s", left.ident, item.String()))
+			equiExpr.Right = sqlparser.NewColName(fmt.Sprintf("%s.%s", right.ident, item.String()))
+			equiExpr.Operator = sqlparser.EqualOp
+
+			expr.Right = equiExpr
+			if i < len(joinExpr.Condition.Using)-1 {
+				newExpr := new(sqlparser.AndExpr)
+				newExpr.Left = expr
+				newExpr.Right = sqlparser.BoolVal(true)
+				expr = newExpr
+			}
+
+		}
+		joinExpr.Condition.On = expr
+	}
 	rs, err := ExecJoin(query, left.from, right.from, left.ident, right.ident, joinExpr.Into, joinExpr.Condition.On, joinExpr.Join)
 	if err != nil {
 		return nil
