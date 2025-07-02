@@ -1500,16 +1500,8 @@ func AggrFunExpr(query *Query, current Map, expr sqlparser.AggrFunc) (any, error
 }
 
 func FuncArgReader(query *Query, current Map, selectExprs []sqlparser.Expr) ([]any, error) {
-	exprs := make([]sqlparser.Expr, 0)
-	for _, expr := range selectExprs {
-		aliasedExpr, ok := expr.(*sqlparser.Subquery)
-		if !ok {
-			return nil, EXPECTATION_FAILED.Extend(fmt.Sprintf("failed to build `FUNCTION ARGUMENT`. expected aliased expression but found %T", expr))
-		}
-		exprs = append(exprs, aliasedExpr)
-	}
 	slice := make([]any, 0)
-	for _, expr := range exprs {
+	for _, expr := range selectExprs {
 		rs, err := Expr(query, current, expr, nil)
 		if err != nil {
 			return nil, err
