@@ -431,7 +431,6 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 			if i < len(joinExpr.Condition.Using)-1 {
 				newExpr := new(sqlparser.AndExpr)
 				newExpr.Left = expr
-				newExpr.Right = sqlparser.BoolVal(true)
 				expr = newExpr
 			}
 
