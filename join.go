@@ -95,10 +95,10 @@ func NewHashedTable() *HashedTable {
 	return out
 }
 
-func ToCatalog(rows []any, ident string, joinExpr sqlparser.Expr) (*HashedTable, error) {
+func ToCatalog(rows []any, ident string, identRight string, joinExpr sqlparser.Expr) (*HashedTable, error) {
 	hashedTable := NewHashedTable()
 	var buffer bytes.Buffer
-	columns := extractJoinColumns(ident, joinExpr)
+	columns := extractJoinColumns(ident, identRight, joinExpr)
 	sort.Slice(columns, func(i, j int) bool {
 		return columns[i] > columns[j]
 	})
@@ -135,13 +135,13 @@ func ExecJoin3(query *Query, left []any, right []any, leftIdent string, rightIde
 		left, right = right, left
 	}
 
-	l, err := ToCatalog(left, leftIdent, joinExpr)
+	l, err := ToCatalog(left, leftIdent, rightIdent, joinExpr)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Println(len(l.Rows), "vs", len(left))
 	then := time.Now()
-	r, err := ToCatalog(right, rightIdent, joinExpr)
+	r, err := ToCatalog(right, rightIdent, leftIdent, joinExpr)
 	if err != nil {
 		return nil, err
 	}
@@ -435,8 +435,8 @@ type SortableRow struct {
 // }
 
 // Helper function to extract left-side join key from row
-func extractJoinKey(ident string, joinExpr sqlparser.Expr) string {
-	keys := extractJoinColumns(ident, joinExpr)
+func extractJoinKey(ident string, identRight string, joinExpr sqlparser.Expr) string {
+	keys := extractJoinColumns(ident, identRight, joinExpr)
 	_ = keys
 	//return buildJoinKey(row, keys)
 	return ""
@@ -474,12 +474,12 @@ func buildJoinKey(row Map, keys []string) string {
 }
 
 // Extract left-side column names from join expression
-func extractJoinColumns(ident string, expr sqlparser.Expr) []string {
+func extractJoinColumns(ident string, identRight string, expr sqlparser.Expr) []string {
 	var columns []string
 
 	switch e := expr.(type) {
 	case *sqlparser.ComparisonExpr:
-		if b, _, leftCol := extractColumnsFromExpr(ident, e.Left); b || len(ident) == 0 {
+		if b, _, leftCol := extractColumnsFromExpr(ident, e.Left); b {
 			columns = append(columns, leftCol)
 			break
 		}
@@ -488,14 +488,22 @@ func extractJoinColumns(ident string, expr sqlparser.Expr) []string {
 			columns = append(columns, rightCol)
 			break
 		}
+
+		b, _, leftCol := extractColumnsFromExpr(identRight, e.Left)
+		_, _, rightCol := extractColumnsFromExpr(identRight, e.Right)
+		if b {
+			columns = append(columns, rightCol)
+			break
+		}
+		columns = append(columns, leftCol)
 	case *sqlparser.AndExpr:
-		leftCols := extractJoinColumns(ident, e.Left)
-		rightCols := extractJoinColumns(ident, e.Right)
+		leftCols := extractJoinColumns(ident, identRight, e.Left)
+		rightCols := extractJoinColumns(ident, identRight, e.Right)
 		columns = append(columns, leftCols...)
 		columns = append(columns, rightCols...)
 	case *sqlparser.OrExpr:
-		leftCols := extractJoinColumns(ident, e.Left)
-		rightCols := extractJoinColumns(ident, e.Right)
+		leftCols := extractJoinColumns(ident, identRight, e.Left)
+		rightCols := extractJoinColumns(ident, identRight, e.Right)
 		columns = append(columns, leftCols...)
 		columns = append(columns, rightCols...)
 	}
