@@ -131,7 +131,7 @@ func ToCatalog(rows []any, ident string, identRight string, joinExpr sqlparser.E
 
 // Original nested loop join (for reference)
 func ExecJoin3(query *Query, left []any, right []any, leftIdent string, rightIdent string, into string, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
-	if joinType == sqlparser.RightJoinType {
+	if !joinType.IsLeftJoin() {
 		left, right = right, left
 	}
 
@@ -152,7 +152,7 @@ func ExecJoin3(query *Query, left []any, right []any, leftIdent string, rightIde
 	if len(into) != 0 {
 		for lk, lv := range l.Rows {
 			rv, exist := r.Rows[lk]
-			if exist {
+			if exist || !joinType.IsInner() {
 				mapper := make(Map)
 				map2 := make(Map)
 				if len(leftIdent) != 0 {
