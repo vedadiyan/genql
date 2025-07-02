@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // All type definitions
@@ -400,15 +401,34 @@ func SelectObject(data map[string]any, key string) any {
 	return value
 }
 
+var (
+	mut   sync.Mutex
+	cache map[string][][]any
+)
+
+func init() {
+	cache = make(map[string][][]any)
+}
+
 func ExecReader(data any, selector string) (any, error) {
-	selectors := strings.Split(selector, "::")
-	result := data
-	for _, item := range selectors {
-		selectors, err := ParseSelector(item)
-		if err != nil {
-			return nil, err
+	mut.Lock()
+	if _, ok := cache[selector]; !ok {
+		allSelectors := make([][]any, 0)
+		selectors := strings.Split(selector, "::")
+		for _, item := range selectors {
+			selectors, err := ParseSelector(item)
+			if err != nil {
+				mut.Unlock()
+				return nil, err
+			}
+			allSelectors = append(allSelectors, selectors)
 		}
-		rs, err := ReaderExecutor(result, selectors)
+		cache[selector] = allSelectors
+	}
+	mut.Unlock()
+	result := data
+	for _, item := range cache[selector] {
+		rs, err := ReaderExecutor(result, item)
 		if err != nil {
 			return nil, err
 		}

@@ -64,16 +64,9 @@ func ExecJoin2(query *Query, left []any, right []any, joinExpr sqlparser.Expr, j
 	return slice, nil
 }
 
-func ToHash(mapper [][]byte) (string, error) {
-	var buffer bytes.Buffer
-	for _, value := range mapper {
-		// binary.Write(&buffer, binary.LittleEndian, value)
-		// buffer.WriteString("-")
-		buffer.Write(value)
-		buffer.WriteString("-")
-	}
+func ToHash(bytes []byte) (string, error) {
 	sha256 := sha256.New()
-	_, err := sha256.Write(buffer.Bytes())
+	_, err := sha256.Write(bytes)
 	if err != nil {
 		return "", err
 	}
@@ -102,21 +95,24 @@ func ToCatalog(rows []any, ident string, identRight string, joinExpr sqlparser.E
 	sort.Slice(columns, func(i, j int) bool {
 		return columns[i] > columns[j]
 	})
+	mappedColumns := make(map[string]string)
+	for _, column := range columns {
+		mappedColumns[column] = strings.ReplaceAll(column, "'", "")
+	}
 	for _, row := range rows {
 		r := row
-		hashMap := make([][]byte, 0)
 		mapper := make(Map)
+		buffer.Reset()
 		for _, column := range columns {
 			reader, err := ExecReader(row, column)
 			if err != nil {
 				return nil, err
 			}
 			binary.Write(&buffer, binary.LittleEndian, reader)
-			hashMap = append(hashMap, buffer.Bytes())
-			buffer.Reset()
-			mapper[strings.ReplaceAll(column, "'", "")] = reader
+			buffer.WriteString("-")
+			mapper[mappedColumns[column]] = reader
 		}
-		hash, err := ToHash(hashMap)
+		hash, err := ToHash(buffer.Bytes())
 		if err != nil {
 			return nil, err
 		}
