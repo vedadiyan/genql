@@ -9,7 +9,7 @@ import (
 	"maps"
 	"sort"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/vedadiyan/sqlparser/v2"
 )
@@ -125,68 +125,229 @@ func ToCatalog(rows []any, ident string, identRight string, joinExpr sqlparser.E
 	return hashedTable, nil
 }
 
-// Original nested loop join (for reference)
-func ExecJoin3(query *Query, left []any, right []any, leftIdent string, rightIdent string, into string, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
-	if !joinType.IsLeftJoin() {
-		left, right = right, left
+type (
+	preference int
+	Join       struct {
+		query                 *Query
+		left, right           []any
+		leftIdent, rightIdent string
+		into                  string
+		joinExpr              sqlparser.Expr
+		joinType              sqlparser.JoinType
+		options               joinOptions
+	}
+	joinOptions struct {
+		preference preference
+	}
+	JoinOption func(*joinOptions)
+)
+
+func NewJoin(query *Query, left, right []any, leftIdent, rightIdent string, into string, joinExpr sqlparser.Expr, joinType sqlparser.JoinType, opts ...JoinOption) *Join {
+	join := new(Join)
+	join.query = query
+	join.left, join.right = left, right
+	join.leftIdent, join.rightIdent = leftIdent, rightIdent
+	join.into = into
+	join.joinExpr = joinExpr
+	join.joinType = joinType
+	for _, opt := range opts {
+		opt(&join.options)
+	}
+	return join
+}
+
+func (j *Join) StraightJoin() ([]any, error) {
+	if !j.joinType.IsLeftJoin() {
+		j.left, j.right = j.right, j.left
 	}
 
-	l, err := ToCatalog(left, leftIdent, rightIdent, joinExpr)
+	l, err := ToCatalog(j.left, j.leftIdent, j.rightIdent, j.joinExpr)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(len(l.Rows), "vs", len(left))
-	then := time.Now()
-	r, err := ToCatalog(right, rightIdent, leftIdent, joinExpr)
+	r, err := ToCatalog(j.right, j.rightIdent, j.leftIdent, j.joinExpr)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
-	fmt.Println(len(r.Rows), "vs", len(right))
-	fmt.Println(now.Sub(then).Milliseconds())
+	return j.ParallelHashJoinFunc(l, r)
+}
+
+func (j *Join) HashJoin() ([]any, error) {
+	if !j.joinType.IsLeftJoin() {
+		j.left, j.right = j.right, j.left
+	}
+
+	l, err := ToCatalog(j.left, j.leftIdent, j.rightIdent, j.joinExpr)
+	if err != nil {
+		return nil, err
+	}
+	r, err := ToCatalog(j.right, j.rightIdent, j.leftIdent, j.joinExpr)
+	if err != nil {
+		return nil, err
+	}
+	return j.StraightJoinFunc(l, r)
+}
+
+func (j *Join) HashJoinFunc(l, r *HashedTable) ([]any, error) {
 	slice := make([]any, 0)
-	if len(into) != 0 {
-		for lk, lv := range l.Rows {
-			rv, exist := r.Rows[lk]
-			if exist || !joinType.IsInner() {
-				mapper := make(Map)
-				map2 := make(Map)
-				if len(leftIdent) != 0 {
-					left := make([]any, 0)
-					for _, x := range lv {
-						left = append(left, (*x).(Map)[leftIdent])
-					}
-					map2[leftIdent] = left
-				} else {
-					for i, x := range lv {
-						if i > 0 {
-							panic("")
-						}
-						maps.Copy(map2, (*x).(Map))
-					}
-				}
-				if len(rightIdent) != 0 {
-					right := make([]any, 0)
-					for _, x := range rv {
-						right = append(right, (*x).(Map)[rightIdent])
-					}
-					map2[rightIdent] = right
-				} else {
-					for i, x := range rv {
-						if i > 0 {
-							panic("")
-						}
-						maps.Copy(map2, (*x).(Map))
-					}
-				}
-				maps.Copy(map2, *(l.Keys[lk]))
-				maps.Copy(map2, *(r.Keys[lk]))
-				mapper[into] = map2
+	for lk := range l.Rows {
+		switch ok, mapper, err := j.HashJoinMatchFunc(lk, l, r); {
+		case ok:
+			{
 				slice = append(slice, mapper)
+			}
+		case !ok && err != nil:
+			{
+				return nil, err
+			}
+		default:
+			{
+				continue
 			}
 		}
 	}
 	return slice, nil
+}
+
+func (j *Join) StraightJoinFunc(l, r *HashedTable) ([]any, error) {
+	slice := make([]any, 0)
+	for lk, lv := range l.Keys {
+		for rk, rv := range r.Keys {
+			_current := make(Map)
+			maps.Copy(_current, *lv)
+			maps.Copy(_current, *rv)
+			rs, err := Expr(j.query, _current, j.joinExpr, HardCodedValueExprOpt())
+			if err != nil {
+				return nil, err
+			}
+			rsValue, ok := rs.(bool)
+			if !ok {
+				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected boolean but found %T", rsValue))
+			}
+			if rsValue || !j.joinType.IsInner() {
+				if len(j.into) != 0 {
+					current := make(Map)
+					if err := Copy(current, l.Rows[lk], j.leftIdent); err != nil {
+						return nil, err
+					}
+					if err := Copy(current, r.Rows[rk], j.rightIdent); err != nil {
+						return nil, err
+					}
+
+					maps.Copy(current, *(l.Keys[lk]))
+					maps.Copy(current, *(r.Keys[rk]))
+					out := make(Map)
+					out[j.into] = current
+					slice = append(slice, current)
+					continue
+				}
+				current := make([]any, 0)
+				for _, lr := range l.Rows[lk] {
+					for _, rr := range r.Rows[rk] {
+						mapper := make(Map)
+						maps.Copy(mapper, (*lr).(Map))
+						maps.Copy(mapper, (*rr).(Map))
+						current = append(current, mapper)
+					}
+				}
+				slice = append(slice, current)
+			}
+		}
+	}
+	return slice, nil
+}
+
+func (j *Join) ParallelHashJoinFunc(l, r *HashedTable) ([]any, error) {
+	var mut sync.Mutex
+	var wg sync.WaitGroup
+	slice := make([]any, 0)
+	for lk := range l.Rows {
+		wg.Add(1)
+		go func(lk string) {
+			defer wg.Done()
+			switch ok, mapper, err := j.HashJoinMatchFunc(lk, l, r); {
+			case ok:
+				{
+					mut.Lock()
+					slice = append(slice, mapper)
+					mut.Unlock()
+				}
+			case !ok && err != nil:
+				{
+					panic(err)
+				}
+			default:
+				{
+					break
+				}
+			}
+		}(lk)
+	}
+	wg.Wait()
+	return slice, nil
+}
+
+func (j *Join) HashJoinMatchFunc(hash string, l, r *HashedTable) (bool, any, error) {
+	if right, ok := r.Rows[hash]; ok || !j.joinType.IsInner() {
+		left := l.Rows[hash]
+		if len(j.into) != 0 {
+			current := make(Map)
+			if err := Copy(current, left, j.leftIdent); err != nil {
+				return false, nil, err
+			}
+			if err := Copy(current, right, j.rightIdent); err != nil {
+				return false, nil, err
+			}
+
+			maps.Copy(current, *(l.Keys[hash]))
+			maps.Copy(current, *(r.Keys[hash]))
+			out := make(Map)
+			out[j.into] = current
+			return true, out, nil
+		}
+		current := make([]any, 0)
+		for _, lr := range left {
+			for _, rr := range right {
+				mapper := make(Map)
+				maps.Copy(mapper, (*lr).(Map))
+				maps.Copy(mapper, (*rr).(Map))
+				current = append(current, mapper)
+			}
+		}
+		return true, current, nil
+	}
+	return false, nil, nil
+}
+
+func Copy(out Map, table []*any, ident string) error {
+	switch l := len(ident); {
+	case l == 0 && len(table) == 1:
+		{
+			index := *table[0]
+			if index, ok := index.(Map); ok {
+				maps.Copy(out, index)
+				break
+			}
+			return fmt.Errorf("expected Map but got %T", index)
+		}
+	case l != 0:
+		{
+			tmp := make([]any, 0)
+			for _, x := range table {
+				if index, ok := (*x).(Map); ok {
+					tmp = append(tmp, index[ident])
+					continue
+				}
+				return fmt.Errorf("expected Map but got %T", *x)
+			}
+			out[ident] = tmp
+		}
+	default:
+		{
+			return fmt.Errorf("expectation failed")
+		}
+	}
+	return nil
 }
 
 // // HashJoin - Build hash table on smaller relation, probe with larger
