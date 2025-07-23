@@ -31,14 +31,7 @@ type (
 		Rows map[string][]*any
 		Keys map[string]*Map
 	}
-	JoinOption func(*joinOptions)
 )
-
-func WithParallelOption(b bool) JoinOption {
-	return func(jo *joinOptions) {
-		jo.parallel = b
-	}
-}
 
 func ToHash(bytes []byte) (string, error) {
 	sha256 := sha256.New()
@@ -94,7 +87,7 @@ func ToCatalog(rows []any, ident string, identRight string, joinExpr sqlparser.E
 	return hashedTable, nil
 }
 
-func NewJoin(query *Query, left, right []any, leftIdent, rightIdent string, into string, joinExpr sqlparser.Expr, joinType sqlparser.JoinType, opts ...JoinOption) *Join {
+func NewJoin(query *Query, left, right []any, leftIdent, rightIdent string, into string, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) *Join {
 	join := new(Join)
 	join.query = query
 	join.left, join.right = left, right
@@ -102,9 +95,7 @@ func NewJoin(query *Query, left, right []any, leftIdent, rightIdent string, into
 	join.into = into
 	join.joinExpr = joinExpr
 	join.joinType = joinType
-	for _, opt := range opts {
-		opt(&join.options)
-	}
+	join.options.parallel = joinType.IsParallel()
 	return join
 }
 
