@@ -17,7 +17,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"maps"
 	"sort"
@@ -82,7 +81,7 @@ func ToCatalog(rows []any, ident string, identRight string, joinExpr sqlparser.E
 			if err != nil {
 				return nil, err
 			}
-			binary.Write(&buffer, binary.LittleEndian, reader)
+			buffer.WriteString(fmt.Sprintf("%v", reader))
 			buffer.WriteString("-")
 			mapper[mappedColumns[column]] = reader
 		}
@@ -177,6 +176,7 @@ func (j *Join) HashJoinFunc(l, r *HashedTable) ([]any, error) {
 }
 
 func (j *Join) StraightJoinFunc(l, r *HashedTable) ([]any, error) {
+	var mut sync.Mutex
 	slice := make([]any, 0)
 	for lk, lv := range l.Keys {
 		switch ok, matches, err := j.StraightJoinMatchFunc(lk, lv, l, r); {
