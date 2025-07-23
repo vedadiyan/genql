@@ -22,10 +22,6 @@ type (
 		into                  string
 		joinExpr              sqlparser.Expr
 		joinType              sqlparser.JoinType
-		options               joinOptions
-	}
-	joinOptions struct {
-		parallel bool
 	}
 	HashedTable struct {
 		Rows map[string][]*any
@@ -95,7 +91,6 @@ func NewJoin(query *Query, left, right []any, leftIdent, rightIdent string, into
 	join.into = into
 	join.joinExpr = joinExpr
 	join.joinType = joinType
-	join.options.parallel = joinType.IsParallel()
 	return join
 }
 
@@ -119,7 +114,7 @@ func (j *Join) StraightJoin() ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !j.options.parallel {
+	if !j.joinType.IsParallel() {
 		return j.StraightJoinFunc(l, r)
 	}
 	return j.ParallelHashJoinFunc(l, r)
@@ -138,7 +133,7 @@ func (j *Join) HashJoin() ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !j.options.parallel {
+	if !j.joinType.IsParallel() {
 		return j.HashJoinFunc(l, r)
 	}
 	return j.ParallelHashJoinFunc(l, r)
