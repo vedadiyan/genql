@@ -49,7 +49,10 @@ func NewHashedTable() *HashedTable {
 func ToCatalog(rows []any, ident string, identRight string, joinExpr sqlparser.Expr) (*HashedTable, error) {
 	hashedTable := NewHashedTable()
 	var buffer bytes.Buffer
-	columns := extractJoinColumns(ident, identRight, joinExpr)
+	columns, err := extractJoinColumns(ident, identRight, joinExpr)
+	if err != nil {
+		return nil, err
+	}
 	sort.Slice(columns, func(i, j int) bool {
 		return columns[i] > columns[j]
 	})
@@ -333,7 +336,7 @@ func Copy(out Map, table []*any, ident string) error {
 				maps.Copy(out, index)
 				break
 			}
-			return fmt.Errorf("expected Map but got %T", index)
+			return EXPECTATION_FAILED.Extend(fmt.Sprintf("expected Map but got %T", index))
 		}
 	case l != 0:
 		{
@@ -343,13 +346,13 @@ func Copy(out Map, table []*any, ident string) error {
 					tmp = append(tmp, index[ident])
 					continue
 				}
-				return fmt.Errorf("expected Map but got %T", *x)
+				return EXPECTATION_FAILED.Extend(fmt.Sprintf("expected Map but got %T", *x))
 			}
 			out[ident] = tmp
 		}
 	default:
 		{
-			return fmt.Errorf("expectation failed")
+			return EXPECTATION_FAILED
 		}
 	}
 	return nil
@@ -379,41 +382,77 @@ func hashJoinAnalyze(ident string, identRight string, expr sqlparser.Expr) bool 
 	return true
 }
 
-func extractJoinColumns(ident string, identRight string, expr sqlparser.Expr) []string {
+func extractJoinColumns(ident string, identRight string, expr sqlparser.Expr) ([]string, error) {
 	var columns []string
 
 	switch e := expr.(type) {
 	case *sqlparser.ComparisonExpr:
-		if b, _, leftCol := extractColumnsFromExpr(ident, e.Left); b {
-			columns = append(columns, leftCol)
-			break
+		{
+			{
+				b, _, leftCol, err := extractColumnsFromExpr(ident, e.Left)
+				if err != nil {
+					return nil, err
+				}
+				if b {
+					columns = append(columns, leftCol)
+					break
+				}
+			}
+			{
+				b, _, rightCol, err := extractColumnsFromExpr(ident, e.Right)
+				if err != nil {
+					return nil, err
+				}
+				if b {
+					columns = append(columns, rightCol)
+					break
+				}
+			}
+			{
+				b, _, leftCol, err := extractColumnsFromExpr(identRight, e.Left)
+				if err != nil {
+					return nil, err
+				}
+				_, _, rightCol, err := extractColumnsFromExpr(identRight, e.Right)
+				if err != nil {
+					return nil, err
+				}
+				if b {
+					columns = append(columns, rightCol)
+					break
+				}
+				columns = append(columns, leftCol)
+			}
 		}
-
-		if b, _, rightCol := extractColumnsFromExpr(ident, e.Right); b {
-			columns = append(columns, rightCol)
-			break
-		}
-
-		b, _, leftCol := extractColumnsFromExpr(identRight, e.Left)
-		_, _, rightCol := extractColumnsFromExpr(identRight, e.Right)
-		if b {
-			columns = append(columns, rightCol)
-			break
-		}
-		columns = append(columns, leftCol)
 	case *sqlparser.AndExpr:
-		leftCols := extractJoinColumns(ident, identRight, e.Left)
-		rightCols := extractJoinColumns(ident, identRight, e.Right)
-		columns = append(columns, leftCols...)
-		columns = append(columns, rightCols...)
+		{
+			leftCols, err := extractJoinColumns(ident, identRight, e.Left)
+			if err != nil {
+				return nil, err
+			}
+			rightCols, err := extractJoinColumns(ident, identRight, e.Right)
+			if err != nil {
+				return nil, err
+			}
+			columns = append(columns, leftCols...)
+			columns = append(columns, rightCols...)
+		}
 	case *sqlparser.OrExpr:
-		leftCols := extractJoinColumns(ident, identRight, e.Left)
-		rightCols := extractJoinColumns(ident, identRight, e.Right)
-		columns = append(columns, leftCols...)
-		columns = append(columns, rightCols...)
+		{
+			leftCols, err := extractJoinColumns(ident, identRight, e.Left)
+			if err != nil {
+				return nil, err
+			}
+			rightCols, err := extractJoinColumns(ident, identRight, e.Right)
+			if err != nil {
+				return nil, err
+			}
+			columns = append(columns, leftCols...)
+			columns = append(columns, rightCols...)
+		}
 	}
 
-	return removeDuplicates(columns)
+	return removeDuplicates(columns), nil
 }
 
 func removeDuplicates(slice []string) []string {
@@ -428,18 +467,22 @@ func removeDuplicates(slice []string) []string {
 	return unique
 }
 
-func extractColumnsFromExpr(ident string, expr sqlparser.Expr) (bool, string, string) {
+func extractColumnsFromExpr(ident string, expr sqlparser.Expr) (bool, string, string, error) {
 
 	switch e := expr.(type) {
 	case *sqlparser.ColName:
-		// Handle column references like "table.column" or just "column"
-		colName := strings.Split(e.Name.String(), ".")
-		if !e.Qualifier.IsEmpty() {
-			colName = append([]string{e.Qualifier.Name.String()}, colName...)
-		}
+		{
+			colName := strings.Split(e.Name.String(), ".")
+			if !e.Qualifier.IsEmpty() {
+				colName = append([]string{e.Qualifier.Name.String()}, colName...)
+			}
 
-		return ident == colName[0], colName[0], strings.Join(colName, ".")
+			return ident == colName[0], colName[0], strings.Join(colName, "."), nil
+		}
+	default:
+		{
+			return false, "", "", EXPECTATION_FAILED.Extend(fmt.Sprintf("expected column name but got %T", e))
+		}
 	}
 
-	panic("")
 }
