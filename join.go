@@ -149,6 +149,7 @@ func (j *Join) StraightJoin() ([]any, error) {
 func (j *Join) Join() ([]any, error) {
 	if !j.joinType.IsLeftJoin() {
 		j.left, j.right = j.right, j.left
+		j.leftIdent, j.rightIdent = j.rightIdent, j.leftIdent
 	}
 
 	l, err := ToCatalog(j.left, j.leftIdent, j.rightIdent, j.joinExpr)
@@ -168,6 +169,7 @@ func (j *Join) Join() ([]any, error) {
 func (j *Join) HashJoin() ([]any, error) {
 	if !j.joinType.IsLeftJoin() {
 		j.left, j.right = j.right, j.left
+		j.leftIdent, j.rightIdent = j.rightIdent, j.leftIdent
 	}
 
 	l, err := ToCatalog(j.left, j.leftIdent, j.rightIdent, j.joinExpr)
@@ -287,7 +289,9 @@ func (j *Join) JoinMatchFunc(lk string, lv *map[string]any, l, r *HashedTable) (
 				}
 
 				maps.Copy(current, *(l.Keys[lk]))
-				maps.Copy(current, *(r.Keys[rk]))
+				if _, ok := r.Keys[rk]; ok {
+					maps.Copy(current, *(r.Keys[rk]))
+				}
 				out := make(Map)
 				out[j.into] = current
 				slice = append(slice, out)
@@ -295,12 +299,19 @@ func (j *Join) JoinMatchFunc(lk string, lv *map[string]any, l, r *HashedTable) (
 			}
 			current := make([]any, 0)
 			for _, lr := range l.Rows[lk] {
-				for _, rr := range r.Rows[rk] {
-					mapper := make(Map)
-					maps.Copy(mapper, (*lr).(Map))
-					maps.Copy(mapper, (*rr).(Map))
-					current = append(current, mapper)
+				if len(r.Rows) > 0 {
+					for _, rr := range r.Rows[rk] {
+						mapper := make(Map)
+						maps.Copy(mapper, (*lr).(Map))
+						maps.Copy(mapper, (*rr).(Map))
+						current = append(current, mapper)
+					}
+					continue
 				}
+				mapper := make(Map)
+				maps.Copy(mapper, (*lr).(Map))
+				mapper[j.rightIdent] = nil
+				current = append(current, mapper)
 			}
 			slice = append(slice, current)
 		}
@@ -351,19 +362,28 @@ func (j *Join) HashJoinMatchFunc(hash string, l, r *HashedTable) (bool, any, err
 			}
 
 			maps.Copy(current, *(l.Keys[hash]))
-			maps.Copy(current, *(r.Keys[hash]))
+			if _, ok := r.Keys[hash]; ok {
+				maps.Copy(current, *(r.Keys[hash]))
+			}
 			out := make(Map)
 			out[j.into] = current
 			return true, out, nil
 		}
 		current := make([]any, 0)
 		for _, lr := range left {
-			for _, rr := range right {
-				mapper := make(Map)
-				maps.Copy(mapper, (*lr).(Map))
-				maps.Copy(mapper, (*rr).(Map))
-				current = append(current, mapper)
+			if len(right) > 0 {
+				for _, rr := range right {
+					mapper := make(Map)
+					maps.Copy(mapper, (*lr).(Map))
+					maps.Copy(mapper, (*rr).(Map))
+					current = append(current, mapper)
+				}
+				continue
 			}
+			mapper := make(Map)
+			maps.Copy(mapper, (*lr).(Map))
+			mapper[j.rightIdent] = nil
+			current = append(current, mapper)
 		}
 		return true, current, nil
 	}
