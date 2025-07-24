@@ -260,7 +260,7 @@ func (j *Join) StraightJoinMatchFunc(lk string, lv *map[string]any, l, r *Hashed
 				maps.Copy(current, *(r.Keys[rk]))
 				out := make(Map)
 				out[j.into] = current
-				slice = append(slice, current)
+				slice = append(slice, out)
 				continue
 			}
 			current := make([]any, 0)
