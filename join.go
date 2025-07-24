@@ -132,7 +132,7 @@ func (j *Join) StraightJoin() ([]any, error) {
 	if !j.joinType.IsParallel() {
 		return j.StraightJoinFunc(l, r)
 	}
-	return j.ParallelHashJoinFunc(l, r)
+	return j.ParallelStraightJoinFunc(l, r)
 }
 
 func (j *Join) HashJoin() ([]any, error) {
