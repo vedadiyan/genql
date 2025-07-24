@@ -110,7 +110,7 @@ func NewJoin(query *Query, left, right []any, leftIdent, rightIdent string, into
 }
 
 func (j *Join) Exec() ([]any, error) {
-	if j.joinType.IsHashJoin() || hashJoinAnalyze(j.leftIdent, j.rightIdent, j.joinExpr) {
+	if j.joinType.IsHashJoin() || (!j.joinType.IsStraightJoin() && hashJoinAnalyze(j.leftIdent, j.rightIdent, j.joinExpr)) {
 		return j.HashJoin()
 	}
 	return j.StraightJoin()
