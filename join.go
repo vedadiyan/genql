@@ -110,13 +110,43 @@ func NewJoin(query *Query, left, right []any, leftIdent, rightIdent string, into
 }
 
 func (j *Join) Exec() ([]any, error) {
-	if j.joinType.IsHashJoin() || (!j.joinType.IsStraightJoin() && hashJoinAnalyze(j.leftIdent, j.rightIdent, j.joinExpr)) {
-		return j.HashJoin()
+
+	switch joinType := j.joinType; {
+	case joinType.IsStraightJoin():
+		{
+			return j.StraightJoin()
+		}
+	case j.joinType.IsHashJoin() || hashJoinAnalyze(j.leftIdent, j.rightIdent, j.joinExpr):
+		{
+			return j.HashJoin()
+		}
+	default:
+		{
+			return j.Join()
+		}
 	}
-	return j.StraightJoin()
 }
 
 func (j *Join) StraightJoin() ([]any, error) {
+	if !j.joinType.IsInner() {
+		return nil, EXPECTATION_FAILED.Extend("straight join cannot be left or right joins")
+	}
+
+	l, err := ToCatalog(j.left, j.leftIdent, j.rightIdent, j.joinExpr)
+	if err != nil {
+		return nil, err
+	}
+	r, err := ToCatalog(j.right, j.rightIdent, j.leftIdent, j.joinExpr)
+	if err != nil {
+		return nil, err
+	}
+	if !j.joinType.IsParallel() {
+		return j.JoinFunc(l, r)
+	}
+	return j.ParallelJoinFunc(l, r)
+}
+
+func (j *Join) Join() ([]any, error) {
 	if !j.joinType.IsLeftJoin() {
 		j.left, j.right = j.right, j.left
 	}
@@ -130,9 +160,9 @@ func (j *Join) StraightJoin() ([]any, error) {
 		return nil, err
 	}
 	if !j.joinType.IsParallel() {
-		return j.StraightJoinFunc(l, r)
+		return j.JoinFunc(l, r)
 	}
-	return j.ParallelStraightJoinFunc(l, r)
+	return j.ParallelJoinFunc(l, r)
 }
 
 func (j *Join) HashJoin() ([]any, error) {
@@ -175,11 +205,11 @@ func (j *Join) HashJoinFunc(l, r *HashedTable) ([]any, error) {
 	return slice, nil
 }
 
-func (j *Join) StraightJoinFunc(l, r *HashedTable) ([]any, error) {
+func (j *Join) JoinFunc(l, r *HashedTable) ([]any, error) {
 	var mut sync.Mutex
 	slice := make([]any, 0)
 	for lk, lv := range l.Keys {
-		switch ok, matches, err := j.StraightJoinMatchFunc(lk, lv, l, r); {
+		switch ok, matches, err := j.JoinMatchFunc(lk, lv, l, r); {
 		case ok:
 			{
 				mut.Lock()
@@ -199,7 +229,7 @@ func (j *Join) StraightJoinFunc(l, r *HashedTable) ([]any, error) {
 	return slice, nil
 }
 
-func (j *Join) ParallelStraightJoinFunc(l, r *HashedTable) ([]any, error) {
+func (j *Join) ParallelJoinFunc(l, r *HashedTable) ([]any, error) {
 	var mut sync.Mutex
 	var wg sync.WaitGroup
 	slice := make([]any, 0)
@@ -208,7 +238,7 @@ func (j *Join) ParallelStraightJoinFunc(l, r *HashedTable) ([]any, error) {
 		wg.Add(1)
 		go func(lk string, lv *map[string]any) {
 			defer wg.Done()
-			switch ok, matches, err := j.StraightJoinMatchFunc(lk, lv, l, r); {
+			switch ok, matches, err := j.JoinMatchFunc(lk, lv, l, r); {
 			case ok:
 				{
 					mut.Lock()
@@ -230,7 +260,7 @@ func (j *Join) ParallelStraightJoinFunc(l, r *HashedTable) ([]any, error) {
 	return slice, nil
 }
 
-func (j *Join) StraightJoinMatchFunc(lk string, lv *map[string]any, l, r *HashedTable) (bool, []any, error) {
+func (j *Join) JoinMatchFunc(lk string, lv *map[string]any, l, r *HashedTable) (bool, []any, error) {
 	slice := make([]any, 0)
 	b := false
 	for rk, rv := range r.Keys {
