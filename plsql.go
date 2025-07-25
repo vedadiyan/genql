@@ -24,7 +24,7 @@ import (
 	"sync"
 
 	"github.com/vedadiyan/genql/compare"
-	"github.com/vedadiyan/sqlparser/pkg/sqlparser"
+	"github.com/vedadiyan/sqlparser/v2"
 )
 
 type (
@@ -46,6 +46,7 @@ type (
 	}
 
 	ExpressionReaderOptions struct {
+		hardCodedRead bool
 	}
 
 	OrderByDefinition []struct {
@@ -79,13 +80,22 @@ type (
 		postProcessors      []func() error
 		dual                bool
 		options             *Options
+
+		ident string
 	}
+	ExprOption func(*ExpressionReaderOptions)
 )
 
 var (
 	functions          map[string]Function
 	immediateFunctions []string
 )
+
+func HardCodedValueExprOpt() ExprOption {
+	return func(ero *ExpressionReaderOptions) {
+		ero.hardCodedRead = true
+	}
+}
 
 func Wrapped() QueryOption {
 	return func(query *Query) {
@@ -232,7 +242,7 @@ func BuildSelect(query *Query, slct *sqlparser.Select) error {
 	if err != nil {
 		return err
 	}
-	err = BuildGroup(query, &slct.GroupBy)
+	err = BuildGroup(query, slct.GroupBy)
 	if err != nil {
 		return err
 	}
@@ -241,7 +251,7 @@ func BuildSelect(query *Query, slct *sqlparser.Select) error {
 		return err
 	}
 	query.havingDefinition = slct.Having
-	query.selectDefinition = slct.SelectExprs
+	query.selectDefinition = *slct.SelectExprs
 	query.whereDefinition = slct.Where
 	query.distinct = slct.Distinct
 	return nil
@@ -281,9 +291,8 @@ func BuildUnion(query *Query, expr *sqlparser.Union) error {
 	slice = append(slice, leftDataArray...)
 	slice = append(slice, rightDataArray...)
 	query.from = slice
-	query.selectDefinition = sqlparser.SelectExprs{
-		&sqlparser.StarExpr{},
-	}
+	query.selectDefinition = sqlparser.SelectExprs{}
+	query.selectDefinition.Exprs = make([]sqlparser.SelectExpr, 0)
 	err = BuildLimit(query, expr.Limit)
 	if err != nil {
 		return err
@@ -295,10 +304,10 @@ func BuildCte(query *Query, expr *sqlparser.With) error {
 	if expr == nil {
 		return nil
 	}
-	for _, cte := range expr.Ctes {
+	for _, cte := range expr.CTEs {
 		copy := *cte
 		query.data[copy.ID.String()] = CteEvaluation(func() (any, error) {
-			query, err := Prepare(query.data, copy.Subquery.Select, query.options)
+			query, err := Prepare(query.data, copy.Subquery, query.options)
 			if err != nil {
 				return nil, err
 			}
@@ -344,7 +353,7 @@ func BuildGroup(query *Query, group *sqlparser.GroupBy) error {
 	if group == nil {
 		return nil
 	}
-	for _, i := range *group {
+	for _, i := range group.Exprs {
 		qualifier, name, err := BuildColumnName(i)
 		if err != nil {
 			return nil
@@ -392,7 +401,7 @@ func BuildFrom(query *Query, tableExpr *sqlparser.TableExpr) error {
 	switch tableExpr := (*tableExpr).(type) {
 	case *sqlparser.AliasedTableExpr:
 		{
-			return BuilFromAliasedTable(query, tableExpr.As.String(), tableExpr.Expr)
+			return BuildFromAliasedTable(query, tableExpr.As.String(), tableExpr.Expr)
 		}
 	case *sqlparser.JoinTableExpr:
 		{
@@ -416,7 +425,27 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 	if err != nil {
 		return err
 	}
-	rs, err := ExecJoin(query, left.from, right.from, joinExpr.Condition.On, joinExpr.Join)
+	if joinExpr.Condition.On == nil {
+		expr := new(sqlparser.AndExpr)
+		expr.Left = sqlparser.BoolVal(true)
+		expr.Right = sqlparser.BoolVal(true)
+		for i, item := range joinExpr.Condition.Using {
+			equiExpr := new(sqlparser.ComparisonExpr)
+			equiExpr.Left = sqlparser.NewColName(fmt.Sprintf("%s.%s", left.ident, item.String()))
+			equiExpr.Right = sqlparser.NewColName(fmt.Sprintf("%s.%s", right.ident, item.String()))
+			equiExpr.Operator = sqlparser.EqualOp
+
+			expr.Right = equiExpr
+			if i < len(joinExpr.Condition.Using)-1 {
+				newExpr := new(sqlparser.AndExpr)
+				newExpr.Left = expr
+				expr = newExpr
+			}
+
+		}
+		joinExpr.Condition.On = expr
+	}
+	rs, err := ExecJoin(query, left.from, right.from, left.ident, right.ident, joinExpr.Into, joinExpr.Condition.On, joinExpr.Join)
 	if err != nil {
 		return nil
 	}
@@ -424,53 +453,8 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 	return nil
 }
 
-func ExecJoin(query *Query, left []any, right []any, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
-	if joinType == sqlparser.RightJoinType {
-		left, right = right, left
-	}
-	slice := make([]any, 0)
-	for _, left := range left {
-		left, ok := left.(Map)
-		if !ok {
-			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", left))
-		}
-		joined := false
-		for _, right := range right {
-			current := make(Map)
-			for key, value := range left {
-				current[key] = value
-			}
-			right, ok := right.(Map)
-			if !ok {
-				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected object but found %T", left))
-			}
-			for key, value := range right {
-				current[key] = value
-			}
-			rs, err := Expr(query, current, joinExpr, nil)
-			if err != nil {
-				return nil, err
-			}
-			rsValue, ok := rs.(bool)
-			if !ok {
-				return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `JOIN` expression, expected boolean but found %T", left))
-			}
-			if rsValue {
-				slice = append(slice, current)
-				joined = true
-			}
-		}
-		if !joined {
-			current := make(Map)
-			for key, value := range left {
-				current[key] = value
-			}
-			if joinType != sqlparser.NormalJoinType {
-				slice = append(slice, current)
-			}
-		}
-	}
-	return slice, nil
+func ExecJoin(query *Query, left []any, right []any, leftIdent string, rightIdent string, into string, joinExpr sqlparser.Expr, joinType sqlparser.JoinType) ([]any, error) {
+	return NewJoin(query, left, right, leftIdent, rightIdent, into, joinExpr, joinType).Exec()
 }
 
 func BuildLiteral(expr sqlparser.Expr) (sqlparser.ValType, string, error) {
@@ -489,7 +473,7 @@ func BuildColumnName(expr sqlparser.Expr) (string, string, error) {
 	return columnName.Qualifier.Name.String(), columnName.Name.String(), nil
 }
 
-func BuilFromAliasedTable(query *Query, as string, expr sqlparser.SimpleTableExpr) error {
+func BuildFromAliasedTable(query *Query, as string, expr sqlparser.SimpleTableExpr) error {
 	switch expr := expr.(type) {
 	case sqlparser.TableName:
 		{
@@ -500,6 +484,11 @@ func BuilFromAliasedTable(query *Query, as string, expr sqlparser.SimpleTableExp
 				tableName = name
 			} else {
 				tableName = fmt.Sprintf("%s.%s", qualifier, name)
+			}
+			if len(as) == 0 {
+				query.ident = strings.SplitN(tableName, ".", 2)[0]
+			} else {
+				query.ident = as
 			}
 			data, err := ExecReader(query.data, tableName)
 			if err != nil {
@@ -589,31 +578,31 @@ func ProcessAlias(data []any, as string) []any {
 	return slice
 }
 
-func Expr(query *Query, current Map, expr sqlparser.Expr, options *ExpressionReaderOptions) (any, error) {
+func Expr(query *Query, current Map, expr sqlparser.Expr, opts ...ExprOption) (any, error) {
 	switch expr := expr.(type) {
 	case *sqlparser.AndExpr:
 		{
-			return AndExpr(query, current, expr)
+			return AndExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.OrExpr:
 		{
-			return OrExpr(query, current, expr)
+			return OrExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.ComparisonExpr:
 		{
-			return ComparisonExpr(query, current, expr)
+			return ComparisonExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.BetweenExpr:
 		{
-			return BetweenExpr(query, current, expr)
+			return BetweenExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.BinaryExpr:
 		{
-			return BinaryExpr(query, current, expr)
+			return BinaryExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.Literal:
 		{
-			return LiteralExpr(query, current, expr)
+			return LiteralExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.NullVal:
 		{
@@ -621,23 +610,23 @@ func Expr(query *Query, current Map, expr sqlparser.Expr, options *ExpressionRea
 		}
 	case *sqlparser.IsExpr:
 		{
-			return IsExpr(query, current, expr)
+			return IsExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.NotExpr:
 		{
-			return NotExpr(query, current, expr)
+			return NotExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.SubstrExpr:
 		{
-			return SubStrExpr(query, current, expr)
+			return SubStrExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.UnaryExpr:
 		{
-			return UnaryExpr(query, current, expr)
+			return UnaryExpr(query, current, expr, opts...)
 		}
 	case sqlparser.ValTuple:
 		{
-			return ValueTupleExpr(query, current, &expr)
+			return ValueTupleExpr(query, current, &expr, opts...)
 		}
 	case sqlparser.BoolVal:
 		{
@@ -645,6 +634,10 @@ func Expr(query *Query, current Map, expr sqlparser.Expr, options *ExpressionRea
 		}
 	case *sqlparser.ColName:
 		{
+			options := new(ExpressionReaderOptions)
+			for _, opt := range opts {
+				opt(options)
+			}
 			qualifier, name, err := BuildColumnName(expr)
 			if err != nil {
 				return nil, err
@@ -653,27 +646,30 @@ func Expr(query *Query, current Map, expr sqlparser.Expr, options *ExpressionRea
 			if len(qualifier) > 0 {
 				columnName = fmt.Sprintf("%s.%s", qualifier, name)
 			}
+			if options.hardCodedRead {
+				columnName = fmt.Sprintf("'%s'", columnName)
+			}
 			return ColumnName(columnName), nil
 		}
 	case *sqlparser.Subquery:
 		{
-			return SubqueryExpr(query, current, expr)
+			return SubqueryExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.CaseExpr:
 		{
-			return CaseExpr(query, current, expr)
+			return CaseExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.ExistsExpr:
 		{
-			return ExistExpr(query, current, expr)
+			return ExistExpr(query, current, expr, opts...)
 		}
 	case *sqlparser.FuncExpr:
 		{
-			return FunExpr(query, current, expr)
+			return FunExpr(query, current, expr, opts...)
 		}
 	case sqlparser.AggrFunc:
 		{
-			return AggrFunExpr(query, current, expr)
+			return AggrFunExpr(query, current, expr, opts...)
 		}
 	default:
 		{
@@ -682,8 +678,8 @@ func Expr(query *Query, current Map, expr sqlparser.Expr, options *ExpressionRea
 	}
 }
 
-func AndExpr(query *Query, current Map, expr *sqlparser.AndExpr) (bool, error) {
-	left, err := Expr(query, current, expr.Left, nil)
+func AndExpr(query *Query, current Map, expr *sqlparser.AndExpr, opts ...ExprOption) (bool, error) {
+	left, err := Expr(query, current, expr.Left, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -698,7 +694,7 @@ func AndExpr(query *Query, current Map, expr *sqlparser.AndExpr) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	right, err := Expr(query, current, expr.Right, nil)
+	right, err := Expr(query, current, expr.Right, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -716,8 +712,8 @@ func AndExpr(query *Query, current Map, expr *sqlparser.AndExpr) (bool, error) {
 	return *leftValue && *rightValue, nil
 }
 
-func OrExpr(query *Query, current Map, expr *sqlparser.OrExpr) (bool, error) {
-	left, err := Expr(query, current, expr.Left, nil)
+func OrExpr(query *Query, current Map, expr *sqlparser.OrExpr, opts ...ExprOption) (bool, error) {
+	left, err := Expr(query, current, expr.Left, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -732,7 +728,7 @@ func OrExpr(query *Query, current Map, expr *sqlparser.OrExpr) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	right, err := Expr(query, current, expr.Right, nil)
+	right, err := Expr(query, current, expr.Right, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -750,10 +746,10 @@ func OrExpr(query *Query, current Map, expr *sqlparser.OrExpr) (bool, error) {
 	return *leftValue || *rightValue, nil
 }
 
-func ComparisonExpr(query *Query, current Map, expr *sqlparser.ComparisonExpr) (bool, error) {
+func ComparisonExpr(query *Query, current Map, expr *sqlparser.ComparisonExpr, opts ...ExprOption) (bool, error) {
 	current["<-"] = query.data
 	defer delete(current, "<-")
-	left, err := Expr(query, current, expr.Left, nil)
+	left, err := Expr(query, current, expr.Left, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -761,7 +757,7 @@ func ComparisonExpr(query *Query, current Map, expr *sqlparser.ComparisonExpr) (
 	if err != nil {
 		return false, err
 	}
-	right, err := Expr(query, current, expr.Right, nil)
+	right, err := Expr(query, current, expr.Right, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -866,8 +862,8 @@ func ComparisonExpr(query *Query, current Map, expr *sqlparser.ComparisonExpr) (
 	}
 }
 
-func BetweenExpr(query *Query, current Map, expr *sqlparser.BetweenExpr) (bool, error) {
-	point, err := Expr(query, current, expr.Left, nil)
+func BetweenExpr(query *Query, current Map, expr *sqlparser.BetweenExpr, opts ...ExprOption) (bool, error) {
+	point, err := Expr(query, current, expr.Left, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -876,12 +872,12 @@ func BetweenExpr(query *Query, current Map, expr *sqlparser.BetweenExpr) (bool, 
 		return false, err
 	}
 	// TO DO: could be either a number or a date
-	from, err := Expr(query, current, expr.From, nil)
+	from, err := Expr(query, current, expr.From, opts...)
 	if err != nil {
 		return false, err
 	}
 	// TO DO: could be either a number or a date
-	to, err := Expr(query, current, expr.To, nil)
+	to, err := Expr(query, current, expr.To, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -900,8 +896,8 @@ func BetweenExpr(query *Query, current Map, expr *sqlparser.BetweenExpr) (bool, 
 	}
 }
 
-func BinaryExpr(query *Query, current Map, expr *sqlparser.BinaryExpr) (*float64, error) {
-	left, err := Expr(query, current, expr.Left, nil)
+func BinaryExpr(query *Query, current Map, expr *sqlparser.BinaryExpr, opts ...ExprOption) (*float64, error) {
+	left, err := Expr(query, current, expr.Left, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -916,7 +912,7 @@ func BinaryExpr(query *Query, current Map, expr *sqlparser.BinaryExpr) (*float64
 	if err != nil {
 		return nil, err
 	}
-	right, err := Expr(query, current, expr.Right, nil)
+	right, err := Expr(query, current, expr.Right, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -994,7 +990,7 @@ func BinaryExpr(query *Query, current Map, expr *sqlparser.BinaryExpr) (*float64
 	}
 }
 
-func LiteralExpr(query *Query, current Map, expr *sqlparser.Literal) (any, error) {
+func LiteralExpr(query *Query, current Map, expr *sqlparser.Literal, opts ...ExprOption) (any, error) {
 	literalType, literalValue, err := BuildLiteral(expr)
 	if err != nil {
 		return nil, err
@@ -1019,8 +1015,8 @@ func LiteralExpr(query *Query, current Map, expr *sqlparser.Literal) (any, error
 	}
 }
 
-func IsExpr(query *Query, current Map, expr *sqlparser.IsExpr) (bool, error) {
-	left, err := Expr(query, current, expr.Left, nil)
+func IsExpr(query *Query, current Map, expr *sqlparser.IsExpr, opts ...ExprOption) (bool, error) {
+	left, err := Expr(query, current, expr.Left, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -1066,8 +1062,8 @@ func IsExpr(query *Query, current Map, expr *sqlparser.IsExpr) (bool, error) {
 	}
 }
 
-func NotExpr(query *Query, current Map, expr *sqlparser.NotExpr) (bool, error) {
-	rs, err := Expr(query, current, expr.Expr, nil)
+func NotExpr(query *Query, current Map, expr *sqlparser.NotExpr, opts ...ExprOption) (bool, error) {
+	rs, err := Expr(query, current, expr.Expr, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -1085,8 +1081,8 @@ func NotExpr(query *Query, current Map, expr *sqlparser.NotExpr) (bool, error) {
 	return !*rsValue, nil
 }
 
-func SubStrExpr(query *Query, current Map, expr *sqlparser.SubstrExpr) (string, error) {
-	str, err := Expr(query, current, expr.Name, nil)
+func SubStrExpr(query *Query, current Map, expr *sqlparser.SubstrExpr, opts ...ExprOption) (string, error) {
+	str, err := Expr(query, current, expr.Name, opts...)
 	if err != nil {
 		return "", err
 	}
@@ -1101,7 +1097,7 @@ func SubStrExpr(query *Query, current Map, expr *sqlparser.SubstrExpr) (string, 
 	if err != nil {
 		return "", err
 	}
-	from, err := Expr(query, current, expr.From, nil)
+	from, err := Expr(query, current, expr.From, opts...)
 	if err != nil {
 		return "", err
 	}
@@ -1118,7 +1114,7 @@ func SubStrExpr(query *Query, current Map, expr *sqlparser.SubstrExpr) (string, 
 	if err != nil {
 		return "", err
 	}
-	to, err := Expr(query, current, expr.To, nil)
+	to, err := Expr(query, current, expr.To, opts...)
 	if err != nil {
 		return "", err
 	}
@@ -1138,8 +1134,8 @@ func SubStrExpr(query *Query, current Map, expr *sqlparser.SubstrExpr) (string, 
 	return string((*strValue)[int(*fromValue):int(*fromValue+*toValue)]), nil
 }
 
-func UnaryExpr(query *Query, current Map, expr *sqlparser.UnaryExpr) (any, error) {
-	val, err := Expr(query, current, expr.Expr, nil)
+func UnaryExpr(query *Query, current Map, expr *sqlparser.UnaryExpr, opts ...ExprOption) (any, error) {
+	val, err := Expr(query, current, expr.Expr, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1185,13 +1181,13 @@ func UnaryExpr(query *Query, current Map, expr *sqlparser.UnaryExpr) (any, error
 	}
 }
 
-func ValueTupleExpr(query *Query, current Map, expr *sqlparser.ValTuple) ([]any, error) {
+func ValueTupleExpr(query *Query, current Map, expr *sqlparser.ValTuple, opts ...ExprOption) ([]any, error) {
 	if expr == nil {
 		return nil, EXPECTATION_FAILED.Extend("failed to build `VALUE TUPLE` expreesion. the expression is nil")
 	}
 	slice := make([]any, 0)
 	for _, value := range *expr {
-		value, err := Expr(query, current, value, nil)
+		value, err := Expr(query, current, value, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -1206,9 +1202,9 @@ func ValueTupleExpr(query *Query, current Map, expr *sqlparser.ValTuple) ([]any,
 	return slice, nil
 }
 
-func SelectExpr(query *Query, current Map, expr *sqlparser.SelectExprs) (Map, error) {
+func SelectExpr(query *Query, current Map, expr *sqlparser.SelectExprs, opts ...ExprOption) (Map, error) {
 	data := make(Map)
-	for _, expr := range *expr {
+	for _, expr := range expr.Exprs {
 		switch expr := expr.(type) {
 		case *sqlparser.StarExpr:
 			{
@@ -1222,7 +1218,7 @@ func SelectExpr(query *Query, current Map, expr *sqlparser.SelectExprs) (Map, er
 			}
 		case *sqlparser.AliasedExpr:
 			{
-				value, err := Expr(query, current, expr.Expr, nil)
+				value, err := Expr(query, current, expr.Expr, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -1278,7 +1274,7 @@ func SelectExpr(query *Query, current Map, expr *sqlparser.SelectExprs) (Map, er
 	return data, nil
 }
 
-func SubqueryExpr(query *Query, current Map, expr *sqlparser.Subquery) (any, error) {
+func SubqueryExpr(query *Query, current Map, expr *sqlparser.Subquery, opts ...ExprOption) (any, error) {
 	// Backward Navigation
 	current["<-"] = query.data
 	query.postProcessors = append(query.postProcessors, func() error {
@@ -1302,9 +1298,9 @@ func SubqueryExpr(query *Query, current Map, expr *sqlparser.Subquery) (any, err
 	return rs, nil
 }
 
-func CaseExpr(query *Query, current Map, expr *sqlparser.CaseExpr) (any, error) {
+func CaseExpr(query *Query, current Map, expr *sqlparser.CaseExpr, opts ...ExprOption) (any, error) {
 	for _, when := range expr.Whens {
-		rs, err := Expr(query, current, when.Cond, nil)
+		rs, err := Expr(query, current, when.Cond, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -1313,19 +1309,19 @@ func CaseExpr(query *Query, current Map, expr *sqlparser.CaseExpr) (any, error) 
 			return nil, INVALID_TYPE.Extend(fmt.Sprintf("failed to build `CASE` caluse. expected a boolean but found %T", value))
 		}
 		if value {
-			return Expr(query, current, when.Val, nil)
+			return Expr(query, current, when.Val, opts...)
 		}
 	}
 	if expr.Else == nil {
-		return Expr(query, current, &sqlparser.NullVal{}, nil)
+		return Expr(query, current, &sqlparser.NullVal{}, opts...)
 	}
-	return Expr(query, current, expr.Else, nil)
+	return Expr(query, current, expr.Else, opts...)
 }
 
 // KNOWN ISSUE:
 // The existing Exist function is inefficient as it does not break when
 // it finds the first value
-func ExistExpr(query *Query, current Map, expr *sqlparser.ExistsExpr) (bool, error) {
+func ExistExpr(query *Query, current Map, expr *sqlparser.ExistsExpr, opts ...ExprOption) (bool, error) {
 	// Backward Navigation
 	current["<-"] = query.data
 	query.postProcessors = append(query.postProcessors, func() error {
@@ -1360,7 +1356,7 @@ func ExistExpr(query *Query, current Map, expr *sqlparser.ExistsExpr) (bool, err
 	return len(array) > 0, err
 }
 
-func FunExpr(query *Query, current Map, expr *sqlparser.FuncExpr) (any, error) {
+func FunExpr(query *Query, current Map, expr *sqlparser.FuncExpr, opts ...ExprOption) (any, error) {
 	name := expr.Name.Lowered()
 
 	if name == "await" {
@@ -1466,15 +1462,15 @@ func FunExpr(query *Query, current Map, expr *sqlparser.FuncExpr) (any, error) {
 			name := fmt.Sprintf("%s.%s", strings.ToLower(expr.Qualifier.String()), expr.Name.Lowered())
 			rs, ok := query.singletonExecutions[name]
 			if !ok {
-				exprs := make(sqlparser.Exprs, 0)
+				exprs := make([]sqlparser.Expr, 0)
 				for _, expr := range expr.Exprs {
-					aliasedExpr, ok := expr.(*sqlparser.AliasedExpr)
+					aliasedExpr, ok := expr.(*sqlparser.Subquery)
 					if !ok {
 						return nil, EXPECTATION_FAILED.Extend(fmt.Sprintf("failed to build global `FUNCTION`. expected aliased expression but found %T", expr))
 					}
-					exprs = append(exprs, aliasedExpr.Expr)
+					exprs = append(exprs, aliasedExpr)
 				}
-				slice, err := AggrFuncArgReader(query, current, exprs)
+				slice, err := AggrFuncArgReader(query, current, sqlparser.Exprs{Exprs: exprs})
 				if err != nil {
 					return nil, err
 				}
@@ -1505,14 +1501,14 @@ func FunExpr(query *Query, current Map, expr *sqlparser.FuncExpr) (any, error) {
 		}
 	}
 }
-func AggrFunExpr(query *Query, current Map, expr sqlparser.AggrFunc) (any, error) {
+func AggrFunExpr(query *Query, current Map, expr sqlparser.AggrFunc, opts ...ExprOption) (any, error) {
 	name := strings.ToLower(expr.AggrName())
 	function, ok := functions[name]
 	if !ok {
 		return nil, INVALID_FUNCTION.Extend(fmt.Sprintf("function %s cannot be found", expr.AggrName()))
 	}
 	if len(query.groupDefinition) != 0 {
-		slice, err := AggrFuncArgReader(query, current, expr.GetArgs())
+		slice, err := AggrFuncArgReader(query, current, sqlparser.Exprs{Exprs: expr.GetArgs()})
 		if err != nil {
 			return nil, err
 		}
@@ -1524,7 +1520,7 @@ func AggrFunExpr(query *Query, current Map, expr sqlparser.AggrFunc) (any, error
 	}
 	rs, ok := query.singletonExecutions[name]
 	if !ok {
-		slice, err := AggrFuncArgReader(query, map[string]any{"*": query.from}, expr.GetArgs())
+		slice, err := AggrFuncArgReader(query, map[string]any{"*": query.from}, sqlparser.Exprs{Exprs: expr.GetArgs()})
 		if err != nil {
 			return nil, err
 		}
@@ -1538,18 +1534,10 @@ func AggrFunExpr(query *Query, current Map, expr sqlparser.AggrFunc) (any, error
 	return rs, nil
 }
 
-func FuncArgReader(query *Query, current Map, selectExprs sqlparser.SelectExprs) ([]any, error) {
-	exprs := make(sqlparser.Exprs, 0)
-	for _, expr := range selectExprs {
-		aliasedExpr, ok := expr.(*sqlparser.AliasedExpr)
-		if !ok {
-			return nil, EXPECTATION_FAILED.Extend(fmt.Sprintf("failed to build `FUNCTION ARGUMENT`. expected aliased expression but found %T", expr))
-		}
-		exprs = append(exprs, aliasedExpr.Expr)
-	}
+func FuncArgReader(query *Query, current Map, selectExprs []sqlparser.Expr, opts ...ExprOption) ([]any, error) {
 	slice := make([]any, 0)
-	for _, expr := range exprs {
-		rs, err := Expr(query, current, expr, nil)
+	for _, expr := range selectExprs {
+		rs, err := Expr(query, current, expr, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -1562,10 +1550,10 @@ func FuncArgReader(query *Query, current Map, selectExprs sqlparser.SelectExprs)
 	return slice, nil
 }
 
-func AggrFuncArgReader(query *Query, current Map, exprs sqlparser.Exprs) ([]any, error) {
+func AggrFuncArgReader(query *Query, current Map, exprs sqlparser.Exprs, opts ...ExprOption) ([]any, error) {
 	slice := make([]any, 0)
-	for _, expr := range exprs {
-		rs, err := Expr(query, current, expr, nil)
+	for _, expr := range exprs.Exprs {
+		rs, err := Expr(query, current, expr, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -1594,9 +1582,9 @@ func AggrFuncArgReader(query *Query, current Map, exprs sqlparser.Exprs) ([]any,
 	return slice, nil
 }
 
-func ExecWhere(query *Query, current Map) (bool, error) {
+func ExecWhere(query *Query, current Map, opts ...ExprOption) (bool, error) {
 	if query.whereDefinition != nil {
-		rs, err := Expr(query, current, query.whereDefinition.Expr, nil)
+		rs, err := Expr(query, current, query.whereDefinition.Expr, opts...)
 		if err != nil {
 			return false, err
 		}
@@ -1663,9 +1651,9 @@ func ExecGroupBy(query *Query, current []any) ([]any, error) {
 	return slice, nil
 }
 
-func ExecHaving(query *Query, current Map) (bool, error) {
+func ExecHaving(query *Query, current Map, opts ...ExprOption) (bool, error) {
 	if query.havingDefinition != nil {
-		rs, err := Expr(query, current, query.havingDefinition.Expr, nil)
+		rs, err := Expr(query, current, query.havingDefinition.Expr, opts...)
 		if err != nil {
 			return false, err
 		}
@@ -1679,7 +1667,7 @@ func ExecHaving(query *Query, current Map) (bool, error) {
 }
 
 func IsSelectAllAggregate(query *Query) bool {
-	for _, slct := range query.selectDefinition {
+	for _, slct := range query.selectDefinition.Exprs {
 		expr, ok := slct.(*sqlparser.AliasedExpr)
 		if !ok {
 			return false

@@ -1,0 +1,83 @@
+package genql
+
+import (
+	"sync"
+
+	"github.com/vedadiyan/sqlparser/v2"
+)
+
+type (
+	options struct {
+		parallel bool
+	}
+	StraightJoin struct {
+		all     []any
+		left    Partition
+		right   Partition
+		mut     sync.Mutex
+		query   *Query
+		expr    sqlparser.Expr
+		options options
+	}
+	Locator struct {
+		Map  *Map
+		Rows []int
+	}
+	Partition   map[string]Locator
+	JoinOptions func(*options)
+)
+
+func ParallelOpt(isParallel bool) JoinOptions {
+	return func(o *options) {
+		o.parallel = true
+	}
+}
+
+func NewStraightJoin(query *Query, left, right []any, expr sqlparser.Expr, opts ...JoinOptions) (StraightJoin, error) {
+	a, b := Postfix(expr)
+	c := append(b, a...)
+	_ = c
+	panic("")
+}
+
+func (j *StraightJoin) RunAuto() ([]any, error) {
+	panic("")
+}
+
+func Postfix(expr sqlparser.Expr) ([]string, []string) {
+	op := make([]string, 0)
+	v := make([]string, 0)
+	switch expr := expr.(type) {
+	case *sqlparser.AndExpr:
+		{
+			ops, vs := Postfix(expr.Left)
+			op = append(op, ops...)
+			v = append(v, vs...)
+			ops, vs = Postfix(expr.Right)
+			op = append(op, ops...)
+			v = append(v, vs...)
+			op = append(op, "AND")
+		}
+	case *sqlparser.OrExpr:
+		{
+			ops, vs := Postfix(expr.Left)
+			op = append(op, ops...)
+			v = append(v, vs...)
+			ops, vs = Postfix(expr.Right)
+			op = append(op, ops...)
+			v = append(v, vs...)
+			op = append(op, "OR")
+		}
+	case *sqlparser.ComparisonExpr:
+		{
+			op = append(op, expr.Operator.ToString())
+			v = append(v, expr.Left.(*sqlparser.ColName).Name.String())
+			v = append(v, expr.Right.(*sqlparser.ColName).Name.String())
+		}
+	default:
+		{
+			panic("")
+		}
+	}
+	return op, v
+}

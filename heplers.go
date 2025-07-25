@@ -14,7 +14,6 @@
 package genql
 
 import (
-	"errors"
 	"reflect"
 	"strings"
 )
@@ -25,9 +24,9 @@ func ValueOf(query *Query, current Map, any any) (any, error) {
 		{
 			rs, err := ExecReader(current, string(value))
 			if err != nil {
-				if errors.Is(err, KEY_NOT_FOUND) {
-					return nil, nil
-				}
+				// if errors.Is(err, KEY_NOT_FOUND) {
+				// 	return nil, nil
+				// }
 				return nil, err
 			}
 			return rs, nil
