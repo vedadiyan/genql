@@ -159,7 +159,7 @@ While GenQL specializes in non-relational data, it adopts much of ANSI SQL synta
         select_expr [[AS] alias] [, select_expr ...]  -- Expressions or columns to select, with optional aliases
         FROM table_references  -- Required: Specifies the tables or data sources to query
         [
-            [PARALLEL] [JOIN | INNER JOIN | LEFT JOIN | RIGHT JOIN | HASH_JOIN]  -- Optional: parallelism and join types
+            [PARALLEL] [JOIN | INNER JOIN | LEFT JOIN | RIGHT JOIN | HASH_JOIN | STRAIGHT_JOIN]  -- Optional: parallelism and join types
             ON A.col = B.col | USING (col)                                       -- Optional: join condition
             [INTO target_alias]                                                  -- Optional: assign result to alias
             table_reference [[AS] alias]  -- Table to join, with optional alias
