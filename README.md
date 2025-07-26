@@ -142,6 +142,7 @@ Structured Query Language (SQL) serves as the common standard for database query
 - ✅ Group By
 - ❎ Joins
     - ✅ Inner, Left, Right Joins
+    - 🆒 Hash, Parallel, Grouped Joins
     - ⭕ Full Outer Join (MySQL limitation)
     - ❌ Natural Joins (not planned)
 - ⭕ Cross Apply (MySQL limitation)
@@ -158,7 +159,9 @@ While GenQL specializes in non-relational data, it adopts much of ANSI SQL synta
         select_expr [[AS] alias] [, select_expr ...]  -- Expressions or columns to select, with optional aliases
         FROM table_references  -- Required: Specifies the tables or data sources to query
         [
-            JOIN | INNER JOIN | LEFT JOIN | RIGHT JOIN  -- Optional: Join types for combining tables
+            [PARALLEL] [JOIN | INNER JOIN | LEFT JOIN | RIGHT JOIN | HASH_JOIN]  -- Optional: parallelism and join types
+            ON A.col = B.col | USING (col)                                       -- Optional: join condition
+            [INTO target_alias]                                                  -- Optional: assign result to alias
             table_reference [[AS] alias]  -- Table to join, with optional alias
             ON join_condition  -- Condition for joining tables
         ]
