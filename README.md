@@ -160,10 +160,9 @@ While GenQL specializes in non-relational data, it adopts much of ANSI SQL synta
         FROM table_references  -- Required: Specifies the tables or data sources to query
         [
             [PARALLEL] [JOIN | INNER JOIN | LEFT JOIN | RIGHT JOIN | HASH_JOIN | LEFT HASH_JOIN | RIGHT HASH_JOIN | STRAIGHT_JOIN]  -- Optional: parallelism and join types
-            ON A.col = B.col | USING (col)                                       -- Optional: join condition
-            [INTO target_alias]                                                  -- Optional: assign result to alias
             table_reference [[AS] alias]  -- Table to join, with optional alias
             ON join_condition  -- Condition for joining tables
+            [INTO target_alias]                                                  -- Optional: assign result to alias
         ]
         [WHERE where_condition]  -- Optional: Filters rows based on specified conditions
         [GROUP BY {col_name} [, col_name ...] ]  -- Optional: Groups rows based on specified columns
