@@ -189,10 +189,10 @@ func (j *Join) HashJoin() ([]any, error) {
 func (j *Join) HashJoinFunc(l, r *HashedTable) ([]any, error) {
 	slice := make([]any, 0)
 	for lk := range l.Rows {
-		switch ok, mapper, err := j.HashJoinMatchFunc(lk, l, r); {
+		switch ok, matches, err := j.HashJoinMatchFunc(lk, l, r); {
 		case ok:
 			{
-				slice = append(slice, mapper)
+				slice = append(slice, matches...)
 			}
 		case !ok && err != nil:
 			{
@@ -297,23 +297,21 @@ func (j *Join) JoinMatchFunc(lk string, lv *map[string]any, l, r *HashedTable) (
 				slice = append(slice, out)
 				continue
 			}
-			current := make([]any, 0)
 			for _, lr := range l.Rows[lk] {
 				if len(r.Rows) > 0 {
 					for _, rr := range r.Rows[rk] {
 						mapper := make(Map)
 						maps.Copy(mapper, (*lr).(Map))
 						maps.Copy(mapper, (*rr).(Map))
-						current = append(current, mapper)
+						slice = append(slice, mapper)
 					}
 					continue
 				}
 				mapper := make(Map)
 				maps.Copy(mapper, (*lr).(Map))
 				mapper[j.rightIdent] = nil
-				current = append(current, mapper)
+				slice = append(slice, mapper)
 			}
-			slice = append(slice, current)
 		}
 	}
 	return b, slice, nil
@@ -327,11 +325,11 @@ func (j *Join) ParallelHashJoinFunc(l, r *HashedTable) ([]any, error) {
 		wg.Add(1)
 		go func(lk string) {
 			defer wg.Done()
-			switch ok, mapper, err := j.HashJoinMatchFunc(lk, l, r); {
+			switch ok, matches, err := j.HashJoinMatchFunc(lk, l, r); {
 			case ok:
 				{
 					mut.Lock()
-					slice = append(slice, mapper)
+					slice = append(slice, matches...)
 					mut.Unlock()
 				}
 			case !ok && err != nil:
@@ -349,7 +347,8 @@ func (j *Join) ParallelHashJoinFunc(l, r *HashedTable) ([]any, error) {
 	return slice, nil
 }
 
-func (j *Join) HashJoinMatchFunc(hash string, l, r *HashedTable) (bool, any, error) {
+func (j *Join) HashJoinMatchFunc(hash string, l, r *HashedTable) (bool, []any, error) {
+	slice := make([]any, 0)
 	if right, ok := r.Rows[hash]; ok || !j.joinType.IsInner() {
 		left := l.Rows[hash]
 		if len(j.into) != 0 {
@@ -367,25 +366,25 @@ func (j *Join) HashJoinMatchFunc(hash string, l, r *HashedTable) (bool, any, err
 			}
 			out := make(Map)
 			out[j.into] = current
-			return true, out, nil
+			slice = append(slice, out)
+			return true, slice, nil
 		}
-		current := make([]any, 0)
 		for _, lr := range left {
 			if len(right) > 0 {
 				for _, rr := range right {
 					mapper := make(Map)
 					maps.Copy(mapper, (*lr).(Map))
 					maps.Copy(mapper, (*rr).(Map))
-					current = append(current, mapper)
+					slice = append(slice, mapper)
 				}
 				continue
 			}
 			mapper := make(Map)
 			maps.Copy(mapper, (*lr).(Map))
 			mapper[j.rightIdent] = nil
-			current = append(current, mapper)
+			slice = append(slice, mapper)
 		}
-		return true, current, nil
+		return true, slice, nil
 	}
 	return false, nil, nil
 }
