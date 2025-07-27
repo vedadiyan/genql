@@ -447,7 +447,7 @@ func BuildJoin(query *Query, joinExpr *sqlparser.JoinTableExpr) error {
 	}
 	rs, err := ExecJoin(query, left.from, right.from, left.ident, right.ident, joinExpr.Into, joinExpr.Condition.On, joinExpr.Join)
 	if err != nil {
-		return nil
+		return err
 	}
 	query.from = rs
 	return nil
