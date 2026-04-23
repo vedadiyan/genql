@@ -258,10 +258,10 @@ func BuildSelect(query *Query, slct *sqlparser.Select) error {
 }
 
 func BuildUnion(query *Query, expr *sqlparser.Union) error {
-	leftStatement := expr.Left.(*sqlparser.Select)
-	leftStatement.With = expr.With
-	rightStatement := expr.Right.(*sqlparser.Select)
-	rightStatement.With = expr.With
+	leftStatement := expr.Left.(sqlparser.SelectStatement)
+	leftStatement.SetWith(expr.With)
+	rightStatement := expr.Right.(sqlparser.SelectStatement)
+	rightStatement.SetWith(expr.With)
 	left, err := Prepare(query.data, leftStatement, query.options)
 	if err != nil {
 		return err
@@ -291,8 +291,11 @@ func BuildUnion(query *Query, expr *sqlparser.Union) error {
 	slice = append(slice, leftDataArray...)
 	slice = append(slice, rightDataArray...)
 	query.from = slice
-	query.selectDefinition = sqlparser.SelectExprs{}
-	query.selectDefinition.Exprs = make([]sqlparser.SelectExpr, 0)
+	query.selectDefinition = sqlparser.SelectExprs{
+		Exprs: []sqlparser.SelectExpr{
+			&sqlparser.StarExpr{},
+		},
+	}
 	err = BuildLimit(query, expr.Limit)
 	if err != nil {
 		return err
